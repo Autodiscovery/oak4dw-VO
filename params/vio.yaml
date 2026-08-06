@@ -31,6 +31,24 @@
       i_height: 400
       i_fps: 30.0
 
+      # Sensor mode, set explicitly rather than left to auto-selection. Two
+      # reasons: requestOutput only honours the GRAY8 request when the sensor is
+      # configured explicitly, and the sensor frame rate only takes effect when
+      # passed to build().
+      #
+      # Must be a resolution the OV9282 supports (1280x800 is native full frame),
+      # and must keep the same aspect ratio as i_width/i_height above so the
+      # downscale is a pure resize. 640x400 and 1280x800 are both 1.6, giving an
+      # exact 2x downscale.
+      i_sensor_width: 1280
+      i_sensor_height: 800
+
+      # Set false if the device is in EXTERNAL FSYNC slave mode -- rate driven by
+      # a signal on the M8 connector rather than by its own sensor pair. In that
+      # case the rate cannot be set from software and trying aborts the pipeline
+      # with "Cannot override fps while using external FSYNC slave mode".
+      i_set_sensor_fps: true
+
       # MUST match StereoDepth's subpixel configuration. 5 bits = 1/32 px.
       # A mismatch scales every depth by a power of two, which produces a
       # trajectory of the right shape and the wrong size.

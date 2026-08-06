@@ -85,6 +85,19 @@ void StereoVioNode::declareParams() {
     height_ = declareOnce<int>(node, "vio.i_height", 400);
     fps_ = declareOnce<double>(node, "vio.i_fps", 30.0);
 
+    // Sensor mode, set explicitly rather than left to auto-selection. Must be a
+    // resolution the OV9282 actually supports; 1280x800 is its native full frame.
+    // Keep the same aspect ratio as i_width/i_height so the downscale is a pure
+    // resize -- see the note on STRETCH in setInOut.
+    sensorWidth_ = declareOnce<int>(node, "vio.i_sensor_width", 1280);
+    sensorHeight_ = declareOnce<int>(node, "vio.i_sensor_height", 800);
+
+    // Whether to set the sensor frame rate at all. Set false if the device is in
+    // *external* FSYNC slave mode, where the rate comes from a signal on the M8
+    // connector and cannot be set from software -- attempting it aborts the
+    // pipeline with "Cannot override fps while using external FSYNC slave mode".
+    declareOnce<bool>(node, "vio.i_set_sensor_fps", true);
+
     // StereoDepth subpixel setting. This MUST match what DisparityMapSource
     // divides by, or every depth is scaled by a power of two and the
     // trajectory comes out the right shape at the wrong scale.
@@ -200,29 +213,73 @@ VioParams StereoVioNode::readParams() {
 
 void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     // ---- Cameras ---------------------------------------------------------
-    // FPS goes to build(), not just requestOutput().
+    // Sensor FPS goes to the FSYNC MASTER only.
     //
-    // build()'s third parameter is the SENSOR frame rate:
-    //     build(CameraBoardSocket, optional<pair<uint32_t,uint32_t>> size, optional<float> fps)
-    // whereas requestOutput's fps only asks for an output stream rate. Passing it
-    // to requestOutput alone left the sensor at 10 Hz against 30 requested,
-    // identically at 1280x800 and at 640x400 -- a rate that does not move with
-    // resolution is not a throughput limit. requestOutput is already known to
-    // ignore its pixel-format argument on this device, so it ignoring fps too is
-    // the parsimonious explanation.
-    const auto sensorFps = static_cast<float>(fps_);
-    leftCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_B, std::nullopt, sensorFps);
-    rightCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_C, std::nullopt, sensorFps);
+    // Setting it on both threw at pipeline start:
+    //
+    //     RPC 'startPipeline' failed: Cannot override fps while using external
+    //     FSYNC slave mode
+    //
+    // On OAK-D-style stereo devices the pair is hardware-synchronised internally:
+    // the left sensor has FSYNC as an INPUT and the right drives it as an OUTPUT.
+    // So CAM_B is a slave by construction, its rate is dictated by CAM_C, and
+    // trying to override it is correctly refused. The master defines the rate;
+    // the slave must be left unset.
+    //
+    // This is also the explanation for the 10 Hz the app has been stuck at all
+    // along: requestOutput's fps argument is ignored on this device (as is its
+    // pixel-format argument), so nothing was ever actually setting the sensor
+    // rate. It was not a throughput limit, which is why it did not move between
+    // 1280x800 and 640x400, and not auto-exposure, which sat at 8.3 ms.
+    //
+    // If this still throws, the device is in *external* FSYNC slave mode -- driven
+    // by a signal on the M8 connector rather than by its own right sensor -- and
+    // the rate cannot be set from software at all. Set
+    // vio.i_set_sensor_fps: false to get back to a running app at whatever rate
+    // the external source dictates.
+    const bool setSensorFps = getROSNode()->get_parameter("vio.i_set_sensor_fps").as_bool();
+    const std::optional<float> sensorFps = setSensorFps ? std::optional<float>(static_cast<float>(fps_)) : std::nullopt;
+    const auto sensorResolution = std::make_pair(sensorWidth_, sensorHeight_);
 
-    // Deliberately not requesting a pixel format. requestOutput ignores the
-    // request on this device and returns NV12 regardless -- a silent
-    // substitution that made an earlier "switch the cameras to GRAY8" change a
-    // complete no-op. StereoDepth accepts the native format happily, and the CPU
-    // tracker reads StereoDepth's rectified output rather than these frames, so
-    // there is nothing to gain by asking.
+    leftCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_B, sensorResolution, sensorFps);
+    rightCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_C, sensorResolution, sensorFps);
+
+    // Explicit mono format, and STRETCH rather than CROP.
+    //
+    // GRAY8 is requested explicitly now that the sensor is configured explicitly.
+    // An earlier attempt to request it was silently downgraded to NV12, but that
+    // was with the sensor resolution left unset.
+    //
+    // The resize mode matters for correctness, not just framing. CROP takes a
+    // centre window out of the sensor image, which would halve the field of view
+    // at 640x400 from a 1280x800 sensor -- and, worse, getCameraIntrinsics()
+    // returns intrinsics SCALED for the requested size (it reported fx=284.08 at
+    // 640x400, exactly half of 568.15 at 1280x800). Scaled intrinsics describe a
+    // downscaled image, not a cropped one, so CROP leaves the camera model
+    // inconsistent with the pixels. STRETCH is a true resize and matches what the
+    // intrinsics assume.
+    //
+    // 640x400 and 1280x800 share an aspect ratio of 1.6, so STRETCH here is an
+    // exact 2x downscale with no distortion. The check below catches the case
+    // where someone picks a size that would actually stretch.
+    const double sensorAspect = static_cast<double>(sensorWidth_) / static_cast<double>(sensorHeight_);
+    const double outputAspect = static_cast<double>(width_) / static_cast<double>(height_);
+    if(std::abs(sensorAspect - outputAspect) > 0.01) {
+        RCLCPP_WARN(getLogger(),
+                    "Output %dx%d (aspect %.3f) does not match sensor %dx%d (aspect %.3f). STRETCH will distort "
+                    "the image and the calibration will not describe it. Pick an output size with the sensor's "
+                    "aspect ratio.",
+                    width_,
+                    height_,
+                    outputAspect,
+                    sensorWidth_,
+                    sensorHeight_,
+                    sensorAspect);
+    }
+
     const auto requested = std::make_pair(width_, height_);
-    auto* leftOutput = leftCamera_->requestOutput(requested, std::nullopt, dai::ImgResizeMode::CROP, static_cast<float>(fps_));
-    auto* rightOutput = rightCamera_->requestOutput(requested, std::nullopt, dai::ImgResizeMode::CROP, static_cast<float>(fps_));
+    auto* leftOutput = leftCamera_->requestOutput(requested, dai::ImgFrame::Type::GRAY8, dai::ImgResizeMode::STRETCH, static_cast<float>(fps_));
+    auto* rightOutput = rightCamera_->requestOutput(requested, dai::ImgFrame::Type::GRAY8, dai::ImgResizeMode::STRETCH, static_cast<float>(fps_));
 
     // ---- Stereo ----------------------------------------------------------
     stereo_ = pipeline->create<dai::node::StereoDepth>();

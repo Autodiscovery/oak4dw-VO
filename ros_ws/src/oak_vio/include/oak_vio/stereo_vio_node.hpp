@@ -98,6 +98,10 @@ class StereoVioNode : public DriverBaseNode {
     // --- Configuration -----------------------------------------------------
     int width_{640};
     int height_{400};
+    /// Sensor mode, set explicitly so GRAY8 is honoured and the frame rate takes
+    /// effect. Must be a resolution the OV9282 supports.
+    int sensorWidth_{1280};
+    int sensorHeight_{800};
     double fps_{30.0};
     int subpixelFractionalBits_{5};
     std::string odomFrame_{"odom"};
