@@ -1,6 +1,20 @@
 # Bug report: OAK 4 D W locked to 10 FPS by external FSYNC slave mode
 
-Ready to file at <https://github.com/luxonis/depthai-core/issues>.
+**Not yet ready to file.** One thing has to be checked first, because it could
+change the whole framing: does a *single* camera on this device accept a frame
+rate? If it does and only the stereo pair refuses, then the sync mode is being
+selected when the pair is configured — which makes this a depthai
+stereo-configuration issue, or our own misuse of it, rather than a device sitting
+in a bad state. Run:
+
+```bash
+python3 tools/probe_frame_rate.py --device <ip>
+```
+
+If even one bare camera refuses, this report stands as written. If only the pair
+refuses, rewrite the summary accordingly before filing.
+
+Filing target: <https://github.com/luxonis/depthai-core/issues>
 
 ## Summary
 
