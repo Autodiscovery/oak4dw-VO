@@ -114,8 +114,11 @@ def cmd_calib(args) -> int:
 # ---------------------------------------------------------------------------
 # rectify
 # ---------------------------------------------------------------------------
-def _build_rectify_pipeline(alpha: float | None, fps: float):
-    pipeline = dai.Pipeline()
+def _build_rectify_pipeline(device, alpha: float | None, fps: float):
+    # Takes the device explicitly. It used to call dai.Pipeline() with no
+    # argument, which auto-discovers -- so --device was accepted and silently
+    # ignored by both the rectify and noise subcommands.
+    pipeline = dai.Pipeline(device)
     left = pipeline.create(dai.node.Camera).build(LEFT_SOCKET)
     right = pipeline.create(dai.node.Camera).build(RIGHT_SOCKET)
 
@@ -195,12 +198,13 @@ def _epipolar_error(left_img, right_img) -> tuple[float, float, int, float]:
 
 def cmd_rectify(args) -> int:
     alphas = [None] if args.alpha is None else args.alpha
+    rectify_device = _connect(args.device)
     print(f"{'alpha':>7} {'valid disp %':>13} {'valid bbox %':>13} "
           f"{'epi med px':>11} {'epi p95 px':>11} {'matches':>8} {'accept %':>9}")
     print("-" * 82)
 
     for alpha in alphas:
-        pipeline, queues = _build_rectify_pipeline(alpha, args.fps)
+        pipeline, queues = _build_rectify_pipeline(rectify_device, alpha, args.fps)
         with pipeline:
             pipeline.start()
             # Discard the first frames: 3A is still settling.
@@ -299,7 +303,20 @@ def cmd_noise(args) -> int:
     print("\nHold the camera STILL either way -- the temporal measurement depends on it.")
     print(f"Sampling {args.frames} frames in {args.settle:.0f} s...\n")
 
-    pipeline, queues = _build_rectify_pipeline(args.alpha[0] if args.alpha else None, args.fps)
+    noise_device = _connect(args.device)
+
+    # Read fx*baseline so disparity can be reported as a distance. Without it the
+    # user has no way to tell from the output that the camera is too close for the
+    # matcher, which is a far more common problem than a bad scene.
+    fx_baseline = None
+    try:
+        calib = noise_device.readCalibration()
+        intrinsics = np.array(calib.getCameraIntrinsics(LEFT_SOCKET, WIDTH, HEIGHT))
+        fx_baseline = float(intrinsics[0, 0]) * float(calib.getBaselineDistance()) / 100.0
+    except Exception as exc:  # noqa: BLE001 - distance reporting is a nicety
+        print(f"  (could not read calibration for range reporting: {exc})")
+
+    pipeline, queues = _build_rectify_pipeline(noise_device, args.alpha[0] if args.alpha else None, args.fps)
     subpixel_scale = 1.0 / 32.0  # matches setSubpixelFractionalBits(5)
 
     with pipeline:
@@ -351,7 +368,31 @@ def cmd_noise(args) -> int:
 
     temporal = volume.std(axis=0)[always_valid]
     sigma = float(np.median(temporal))
-    print(f"  median disparity:               {float(np.median(volume[:, always_valid])):.2f} px")
+    median_disparity = float(np.median(volume[:, always_valid]))
+    if fx_baseline:
+        print(f"  median disparity:               {median_disparity:.2f} px  "
+              f"(~{fx_baseline / max(median_disparity, 1e-6):.2f} m away)")
+    else:
+        print(f"  median disparity:               {median_disparity:.2f} px")
+
+    # Range matters more than most people expect, and the failure is silent.
+    # StereoDepth searches a bounded disparity range -- roughly 95 px without
+    # extended disparity -- so anything closer than about f*b/95 simply cannot be
+    # matched. Near range also has large occlusion zones where the two views do
+    # not overlap at all. Both show up as low coverage that looks like a texture
+    # problem and is not.
+    if median_disparity > 80.0:
+        near_limit = (fx_baseline / 95.0) if fx_baseline else 0.0
+        print(f"\n  TOO CLOSE. A median disparity of {median_disparity:.0f} px is at or past the matcher's")
+        print("  search limit (~95 px without extended disparity), so most of the frame cannot be")
+        print("  matched at all and the coverage figure above says nothing about the scene.")
+        if near_limit:
+            print(f"  Minimum workable range here is about {near_limit:.2f} m.")
+        print("  Move back to 2-5 m and re-run. That is also where the VO actually operates, so")
+        print("  sigma_d measured there is the figure worth having.")
+    elif median_disparity < 3.0:
+        print(f"\n  Very far ({median_disparity:.1f} px disparity). Disparity noise is a larger share of")
+        print("  the signal out here, so this will read pessimistically. 2-5 m is the useful range.")
     print(f"\n  TEMPORAL noise (sigma_d):        {sigma:.3f} px"
           f"   [p10 {np.percentile(temporal, 10):.3f}, p90 {np.percentile(temporal, 90):.3f}]")
     print(f"  subpixel quantisation step:     {subpixel_scale:.4f} px")
