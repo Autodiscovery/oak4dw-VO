@@ -219,7 +219,12 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     // several bring-up iterations to pin down.
     imageManip_ = pipeline->create<dai::node::ImageManip>();
     imageManip_->initialConfig->setFrameType(dai::ImgFrame::Type::GRAY8);
-    imageManip_->setMaxOutputFrameSize(width_ * height_);
+    // Generous, because the manip pads to hardware alignment. At 640x400 it
+    // emitted 266240 bytes -- 640x416, height rounded up to a multiple of 32 --
+    // and skipped every frame against a width*height budget. 1280x800 happened
+    // not to need padding (800 is already a multiple of 32), which is why the
+    // bug only appeared when the resolution changed.
+    imageManip_->setMaxOutputFrameSize(width_ * height_ * 2);
     stereo_->rectifiedLeft.link(imageManip_->inputImage);
     imageManip_->out.link(featureTracker_->inputImage);
 
@@ -234,8 +239,20 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     //
     // Local memory, not XLink -- the app runs on the device -- so this costs a
     // memcpy per frame, not bandwidth. Remove once bring-up is finished.
+    // Exposure and ISO are the decisive measurement for the 10 Hz.
+    // Auto-exposure cannot run longer than the frame period, so the causality
+    // also works backwards: if AE wants ~100 ms for a dim scene, the sensor can
+    // only deliver ~10 FPS no matter what was requested. That would explain the
+    // rate and the absent corners with one cause, since a dark high-gain frame
+    // has little of the local gradient structure Harris needs.
     cameraRate_.queue = leftOutput->createOutputQueue(1, false);
-    cameraRate_.queue->addCallback([this](const std::shared_ptr<dai::ADatatype>&) { ++cameraRate_.count; });
+    cameraRate_.queue->addCallback([this](const std::shared_ptr<dai::ADatatype>& message) {
+        ++cameraRate_.count;
+        if(const auto frame = std::dynamic_pointer_cast<dai::ImgFrame>(message)) {
+            lastExposureUs_ = static_cast<long>(std::chrono::duration_cast<std::chrono::microseconds>(frame->getExposureTime()).count());
+            lastSensitivityIso_ = frame->getSensitivity();
+        }
+    });
 
     disparityRate_.queue = stereo_->disparity.createOutputQueue(1, false);
     disparityRate_.queue->addCallback([this](const std::shared_ptr<dai::ADatatype>&) { ++disparityRate_.count; });
@@ -502,16 +519,35 @@ void StereoVioNode::onFrame(const std::shared_ptr<dai::MessageGroup>& group) {
             stage.previous = current;
             return hz;
         };
+        const double cameraHz = rate(cameraRate_);
+        const long exposureUs = lastExposureUs_.load();
         RCLCPP_INFO(getLogger(),
                     "VO stage rates (Hz): camera %.1f -> stereo.disparity %.1f | manip %.1f -> tracker %.1f "
-                    "(last message carried %zu features) | synced %.1f, requested %.1f",
-                    rate(cameraRate_),
+                    "(last message carried %zu features) | synced %.1f, requested %.1f | "
+                    "exposure %.1f ms, ISO %d",
+                    cameraHz,
                     rate(disparityRate_),
                     rate(manipRate_),
                     rate(featureRate_),
                     lastFeatureCount_.load(),
                     static_cast<double>(frameIndexDelta_) / elapsed,
-                    fps_);
+                    fps_,
+                    static_cast<double>(exposureUs) / 1000.0,
+                    lastSensitivityIso_.load());
+
+        // Auto-exposure can never exceed the frame period, so an exposure
+        // sitting at roughly 1/rate means AE is the thing capping the rate --
+        // the scene is too dark for the requested frame rate, not a
+        // misconfigured pipeline.
+        if(cameraHz > 1.0 && exposureUs > 0 && static_cast<double>(exposureUs) * 1e-6 > 0.8 / cameraHz) {
+            RCLCPP_WARN(getLogger(),
+                        "Auto-exposure (%.1f ms) is saturating the frame period at %.1f Hz: the scene is too "
+                        "dark for %.0f FPS. Expect few or no Harris corners in a frame this dim. Add light, "
+                        "enable IR flood illumination, or cap exposure with driver auto-exposure limits.",
+                        static_cast<double>(exposureUs) / 1000.0,
+                        cameraHz,
+                        fps_);
+        }
         frameIndexDelta_ = 0;
         lastRateLog_ = now;
     }

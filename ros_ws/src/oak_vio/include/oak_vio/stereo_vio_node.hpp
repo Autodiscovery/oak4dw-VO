@@ -99,6 +99,10 @@ class StereoVioNode : public DriverBaseNode {
     std::atomic<unsigned> lastManipHeight_{0};
     std::atomic<std::size_t> lastManipBytes_{0};
     std::atomic<std::size_t> lastFeatureCount_{0};
+    /// Auto-exposure state. An exposure near the frame period means AE is what
+    /// is capping the frame rate, and a dim frame is why there are no corners.
+    std::atomic<long> lastExposureUs_{0};
+    std::atomic<int> lastSensitivityIso_{0};
 
     std::string syncQueueName_;
     std::string disparityKey_;
