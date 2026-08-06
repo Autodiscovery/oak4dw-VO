@@ -140,45 +140,64 @@ def _build_rectify_pipeline(alpha: float | None, fps: float):
     return pipeline, queues
 
 
-def _epipolar_error(left_img, right_img) -> tuple[float, float, int]:
+def _epipolar_error(left_img, right_img) -> tuple[float, float, int, float]:
     """Median and 95th-pct |dv| between matched corners in a rectified pair.
 
     In a correctly rectified pair this should be a small fraction of a pixel.
     A large value means rectification is not doing its job and every depth is
     suspect.
+
+    Matching left against right with Lucas-Kanade is the weak link: the two views
+    differ by more than a small flow, so plain LK produces a substantial minority
+    of confident nonsense. An earlier version of this function reported those
+    mismatches as epipolar error, which made rectification look far worse than the
+    evidence supported.
+
+    Two corrections. Bad matches are rejected by forward-backward consistency --
+    match right, then match back to left, and require the round trip to return to
+    where it started -- which is a geometry-agnostic test. And the acceptance rate
+    is returned, because a low rate means the remaining statistics rest on a small
+    biased sample and should not be trusted on their own.
+
+    Deliberately NOT filtered on |dv| itself: excluding large vertical
+    disagreements would be assuming the answer and would bias the estimate
+    downward.
     """
     if cv2 is None:
-        return float("nan"), float("nan"), 0
+        return float("nan"), float("nan"), 0, float("nan")
 
     corners = cv2.goodFeaturesToTrack(left_img, maxCorners=600, qualityLevel=0.01, minDistance=12)
     if corners is None or len(corners) < 20:
-        return float("nan"), float("nan"), 0
+        return float("nan"), float("nan"), 0, float("nan")
 
-    tracked, status, _ = cv2.calcOpticalFlowPyrLK(
-        left_img, right_img, corners, None,
-        winSize=(21, 21), maxLevel=4,
-        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
-    )
-    ok = status.ravel() == 1
+    lk = dict(winSize=(21, 21), maxLevel=4,
+              criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+
+    tracked, status, _ = cv2.calcOpticalFlowPyrLK(left_img, right_img, corners, None, **lk)
+    back, status_back, _ = cv2.calcOpticalFlowPyrLK(right_img, left_img, tracked, None, **lk)
+
+    ok = (status.ravel() == 1) & (status_back.ravel() == 1)
+    round_trip = np.linalg.norm((back - corners).reshape(-1, 2), axis=1)
+    ok &= round_trip < 1.0
+
+    src = corners.reshape(-1, 2)
+    dst = tracked.reshape(-1, 2)
+    # A match must lie to the left in the right image; that is what disparity is.
+    ok &= (src[:, 0] - dst[:, 0]) > 0.5
+
+    acceptance = float(ok.sum()) / float(len(corners))
     if ok.sum() < 20:
-        return float("nan"), float("nan"), 0
+        return float("nan"), float("nan"), int(ok.sum()), acceptance
 
-    src = corners[ok].reshape(-1, 2)
-    dst = tracked[ok].reshape(-1, 2)
-    disparity = src[:, 0] - dst[:, 0]
-    sane = disparity > 0.5  # matches must lie to the left in the right image
-    if sane.sum() < 20:
-        return float("nan"), float("nan"), 0
-
-    dv = np.abs(src[sane, 1] - dst[sane, 1])
-    return float(np.median(dv)), float(np.percentile(dv, 95)), int(sane.sum())
+    dv = np.abs(src[ok, 1] - dst[ok, 1])
+    return float(np.median(dv)), float(np.percentile(dv, 95)), int(ok.sum()), acceptance
 
 
 def cmd_rectify(args) -> int:
     alphas = [None] if args.alpha is None else args.alpha
-    print(f"{'alpha':>7} {'valid disp %':>13} {'FoV kept %':>11} "
-          f"{'epi med px':>11} {'epi p95 px':>11} {'matches':>8}")
-    print("-" * 68)
+    print(f"{'alpha':>7} {'valid disp %':>13} {'valid bbox %':>13} "
+          f"{'epi med px':>11} {'epi p95 px':>11} {'matches':>8} {'accept %':>9}")
+    print("-" * 82)
 
     for alpha in alphas:
         pipeline, queues = _build_rectify_pipeline(alpha, args.fps)
@@ -191,7 +210,7 @@ def cmd_rectify(args) -> int:
                     q.tryGet()
                 time.sleep(0.05)
 
-            coverage, kept, epi_med, epi_p95, matches = [], [], [], [], []
+            coverage, bbox, epi_med, epi_p95, matches, accept = [], [], [], [], [], []
             for _ in range(args.frames):
                 left = queues["rectifiedLeft"].get()
                 right = queues["rectifiedRight"].get()
@@ -203,31 +222,45 @@ def cmd_rectify(args) -> int:
                 d = np.asarray(disp.getFrame())
                 coverage.append(100.0 * np.count_nonzero(d) / d.size)
 
-                # Rectification pads invalid regions with zeros in the
-                # rectified image; the non-black fraction approximates how
-                # much of the sensor's field of view survived.
+                # Extent of the region the matcher solved anything in, as a
+                # fraction of the frame. An earlier version reported the non-black
+                # fraction of the rectified image as "FoV kept", which returned
+                # exactly 100.0% for every alpha -- rectification here does not
+                # zero-pad, so that metric could only ever say 100%. This at least
+                # measures something that varies.
+                rows = np.any(d > 0, axis=1)
+                cols = np.any(d > 0, axis=0)
+                if rows.any() and cols.any():
+                    height = np.flatnonzero(rows)[-1] - np.flatnonzero(rows)[0] + 1
+                    width = np.flatnonzero(cols)[-1] - np.flatnonzero(cols)[0] + 1
+                    bbox.append(100.0 * (height * width) / d.size)
+
                 if left_img is not None:
-                    kept.append(100.0 * np.count_nonzero(left_img) / left_img.size)
-                    m, p, n = _epipolar_error(left_img, right_img)
+                    m, p, n, a = _epipolar_error(left_img, right_img)
+                    accept.append(100.0 * a)
                     if not np.isnan(m):
                         epi_med.append(m)
                         epi_p95.append(p)
                         matches.append(n)
 
+            mean = lambda xs: np.mean(xs) if len(xs) else float("nan")  # noqa: E731
             label = "default" if alpha is None else f"{alpha:.2f}"
-            print(f"{label:>7} {np.mean(coverage):>13.1f} "
-                  f"{(np.mean(kept) if kept else float('nan')):>11.1f} "
-                  f"{(np.mean(epi_med) if epi_med else float('nan')):>11.3f} "
-                  f"{(np.mean(epi_p95) if epi_p95 else float('nan')):>11.3f} "
-                  f"{(int(np.mean(matches)) if matches else 0):>8}")
+            print(f"{label:>7} {mean(coverage):>13.1f} {mean(bbox):>13.1f} "
+                  f"{mean(epi_med):>11.3f} {mean(epi_p95):>11.3f} "
+                  f"{(int(mean(matches)) if matches else 0):>8} {mean(accept):>9.1f}")
 
     print("\nReading these numbers:")
-    print("  valid disp %  higher is better; how much of the image the block matcher solved.")
-    print("  FoV kept %    higher keeps more of the wide lens; falls as alpha crops harder.")
+    print("  valid disp %  how much of the image the block matcher solved. Below ~20% on a")
+    print("                textured scene suggests the stereo pair is not matching well.")
+    print("  valid bbox %  extent of the solved region. Much larger than 'valid disp %' means")
+    print("                the solved pixels are scattered rather than a coherent area.")
     print("  epi med px    should be well under 0.5 px. Above ~1 px, rectification is the")
-    print("                problem and no amount of estimator tuning will fix the drift.")
-    print("\nPick the alpha with acceptable epipolar error and the most retained FoV,")
-    print("then put it in params/vio.yaml as vio.i_alpha_scaling.")
+    print("                problem and no estimator tuning will fix the resulting scale error.")
+    print("  accept %      fraction of corners that survived the forward-backward match check.")
+    print("                Below ~50%, treat the epipolar figures as unreliable: too few")
+    print("                trustworthy matches to characterise the rectification.")
+    print("\nIf every alpha gives identical numbers, setAlphaScaling is having no effect on")
+    print("this platform, and the choice of alpha is not the lever to pull.")
     return 0
 
 
@@ -235,14 +268,29 @@ def cmd_rectify(args) -> int:
 # noise
 # ---------------------------------------------------------------------------
 def cmd_noise(args) -> int:
-    """Measure disparity noise against a flat surface.
+    """Measure disparity noise, and separately how pinhole-like the rectified pair is.
 
-    Point the camera squarely at a textured flat wall filling the frame, 2-4 m
-    away. We fit a plane to the disparity in a central ROI -- a plane in 3D is
-    also a plane in disparity space, which is what makes this work -- and the
-    residual scatter is the disparity noise.
+    Two different quantities, which an earlier version of this command conflated
+    into one misleading figure.
+
+    TEMPORAL NOISE is the per-pixel standard deviation of disparity across frames
+    with the camera and scene held still. That is sigma_d, the quantity the
+    estimator's weighting and covariance actually need. It assumes nothing about
+    the scene or the camera model, which is what makes it trustworthy.
+
+    PLANE-FIT RESIDUAL fits `disparity = a*x + b*y + c` over a central ROI. For a
+    flat wall viewed through an ideal PINHOLE, disparity is exactly linear in image
+    coordinates, so the residual would be pure noise. Through a lens that is not
+    behaving as a rectified pinhole it is not linear at all, and the residual is
+    dominated by model error instead.
+
+    The earlier version reported only the plane-fit residual and called it noise.
+    On this camera that produced 12.7 px, which would be an absurd noise figure --
+    it was measuring the failure of the pinhole assumption, not the sensor. Both
+    are reported now, and the gap between them is itself the diagnostic.
     """
     print("Point the camera at a flat, textured wall filling the frame (2-4 m).")
+    print("Hold the camera STILL -- the temporal measurement depends on it.")
     print(f"Sampling {args.frames} frames in {args.settle:.0f} s...\n")
 
     pipeline, queues = _build_rectify_pipeline(args.alpha[0] if args.alpha else None, args.fps)
@@ -255,9 +303,10 @@ def cmd_noise(args) -> int:
             queues["disparity"].tryGet()
             time.sleep(0.05)
 
-        residual_stds, plane_disparities = [], []
+        stack, residual_stds, plane_disparities = [], [], []
         for _ in range(args.frames):
             d = np.asarray(queues["disparity"].get().getFrame()).astype(np.float64) * subpixel_scale
+            stack.append(d)
 
             h, w = d.shape
             y0, y1 = int(0.35 * h), int(0.65 * h)
@@ -273,28 +322,48 @@ def cmd_noise(args) -> int:
             A = np.column_stack([xs[valid], ys[valid], np.ones(valid.sum())])
             coeffs, *_ = np.linalg.lstsq(A, roi[valid], rcond=None)
             residual = roi[valid] - A @ coeffs
-
-            # Trim the tail before taking the std: mismatches are outliers, not
-            # noise, and would inflate the estimate.
             lo, hi = np.percentile(residual, [2, 98])
             trimmed = residual[(residual >= lo) & (residual <= hi)]
             residual_stds.append(float(np.std(trimmed)))
             plane_disparities.append(float(np.median(roi[valid])))
 
-    if not residual_stds:
-        print("Not enough valid disparity in the ROI. Is the wall textured and lit?")
+    if not stack:
+        print("No disparity frames received.")
         return 1
 
-    sigma = float(np.median(residual_stds))
-    disparity = float(np.median(plane_disparities))
-    print(f"  frames used:              {len(residual_stds)}")
-    print(f"  median disparity in ROI:  {disparity:.2f} px")
-    print(f"  disparity noise (sigma):  {sigma:.3f} px")
-    print(f"  per-frame spread:         {np.min(residual_stds):.3f} - {np.max(residual_stds):.3f} px")
-    print(f"\n  Subpixel quantisation step is {subpixel_scale:.4f} px -- note how far")
-    print(f"  above it the real noise sits. That gap is exactly the mistake this")
-    print(f"  measurement exists to prevent.")
+    # --- Temporal noise: this is sigma_d ---------------------------------
+    volume = np.stack(stack)
+    always_valid = np.all(volume > 0.5, axis=0)
+    print(f"  frames used:                    {len(stack)}")
+    print(f"  pixels valid in every frame:    {100.0 * always_valid.mean():.1f}%")
+
+    if always_valid.sum() < 500:
+        print("\n  Too few consistently valid pixels for a temporal measurement. Either the")
+        print("  scene has little texture, or the stereo pair is matching poorly -- check")
+        print("  the epipolar figures from the 'rectify' subcommand first.")
+        return 1
+
+    temporal = volume.std(axis=0)[always_valid]
+    sigma = float(np.median(temporal))
+    print(f"  median disparity:               {float(np.median(volume[:, always_valid])):.2f} px")
+    print(f"\n  TEMPORAL noise (sigma_d):        {sigma:.3f} px"
+          f"   [p10 {np.percentile(temporal, 10):.3f}, p90 {np.percentile(temporal, 90):.3f}]")
+    print(f"  subpixel quantisation step:     {subpixel_scale:.4f} px")
+
+    # --- Plane-fit residual: model error, not noise ------------------------
+    if residual_stds:
+        plane = float(np.median(residual_stds))
+        print(f"  PLANE-FIT residual:              {plane:.3f} px  (over {float(np.median(plane_disparities)):.1f} px disparity)")
+        if plane > 4.0 * max(sigma, 1e-6):
+            print(f"\n  The plane-fit residual is {plane / max(sigma, 1e-6):.0f}x the temporal noise. On a flat wall")
+            print("  that gap is model error, not sensor noise: disparity is only linear across a")
+            print("  plane for an ideal rectified pinhole, so a large residual says the rectified")
+            print("  pair is not behaving as one. That matters for absolute scale and for the")
+            print("  wide-lens question in the README -- but it is NOT sigma_d, and it must not be")
+            print("  used as one.")
+
     print(f"\n  Set in params/vio.yaml:   vio.i_disparity_sigma_px: {sigma:.2f}")
+    print("  (the temporal figure -- the plane-fit residual above is a different quantity)")
     return 0
 
 
