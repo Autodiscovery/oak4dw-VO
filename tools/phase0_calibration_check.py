@@ -289,8 +289,14 @@ def cmd_noise(args) -> int:
     it was measuring the failure of the pinhole assumption, not the sensor. Both
     are reported now, and the gap between them is itself the diagnostic.
     """
-    print("Point the camera at a flat, textured wall filling the frame (2-4 m).")
-    print("Hold the camera STILL -- the temporal measurement depends on it.")
+    print("Two measurements with DIFFERENT scene requirements:")
+    print("  sigma_d      needs texture. Any static, cluttered, well-lit scene will do --")
+    print("               a bookshelf, a desk, a room. Planarity is irrelevant.")
+    print("  model error  needs texture AND a flat surface filling the frame: a brick wall,")
+    print("               a large poster, newspaper taped up. A plain painted wall has no")
+    print("               texture, gives almost no valid disparity, and makes both")
+    print("               measurements worthless.")
+    print("\nHold the camera STILL either way -- the temporal measurement depends on it.")
     print(f"Sampling {args.frames} frames in {args.settle:.0f} s...\n")
 
     pipeline, queues = _build_rectify_pipeline(args.alpha[0] if args.alpha else None, args.fps)
@@ -334,13 +340,13 @@ def cmd_noise(args) -> int:
     # --- Temporal noise: this is sigma_d ---------------------------------
     volume = np.stack(stack)
     always_valid = np.all(volume > 0.5, axis=0)
+    validity = float(always_valid.mean())
     print(f"  frames used:                    {len(stack)}")
-    print(f"  pixels valid in every frame:    {100.0 * always_valid.mean():.1f}%")
+    print(f"  pixels valid in every frame:    {100.0 * validity:.1f}%")
 
     if always_valid.sum() < 500:
-        print("\n  Too few consistently valid pixels for a temporal measurement. Either the")
-        print("  scene has little texture, or the stereo pair is matching poorly -- check")
-        print("  the epipolar figures from the 'rectify' subcommand first.")
+        print("\n  Too few consistently valid pixels for any measurement. The scene almost")
+        print("  certainly lacks texture -- point at something visually busy.")
         return 1
 
     temporal = volume.std(axis=0)[always_valid]
@@ -349,6 +355,12 @@ def cmd_noise(args) -> int:
     print(f"\n  TEMPORAL noise (sigma_d):        {sigma:.3f} px"
           f"   [p10 {np.percentile(temporal, 10):.3f}, p90 {np.percentile(temporal, 90):.3f}]")
     print(f"  subpixel quantisation step:     {subpixel_scale:.4f} px")
+
+    if validity < 0.25:
+        print(f"\n  CAUTION: only {100.0 * validity:.1f}% of pixels were valid throughout, so sigma_d is")
+        print("  measured on whichever pixels the matcher found easiest -- a biased sample that")
+        print("  will read optimistically. Treat it as a lower bound and re-measure on a")
+        print("  more textured scene.")
 
     # --- Plane-fit residual: model error, not noise ------------------------
     if residual_stds:
@@ -379,7 +391,13 @@ def cmd_noise(args) -> int:
     core[y0:y1, x0:x1] = True
     core &= reference > 0.5
 
-    if core.sum() > 500:
+    if validity < 0.40:
+        print(f"\n  SKIPPING the model-error analysis: only {100.0 * validity:.1f}% of pixels are valid, and it")
+        print("  needs a flat surface actually filling the frame. With coverage this sparse the")
+        print("  surviving pixels are scattered fragments at assorted depths, not a plane, and")
+        print("  fitting one to them produces confident-looking nonsense.")
+        print("  Re-run against a brick wall, a large poster, or newspaper taped to a wall.")
+    elif core.sum() > 500:
         A = np.column_stack([xs[core], ys[core], np.ones(core.sum())])
         coeffs, *_ = np.linalg.lstsq(A, reference[core], rcond=None)
 
@@ -389,10 +407,26 @@ def cmd_noise(args) -> int:
         radius = np.hypot(xs - w / 2.0, ys - h / 2.0)
         max_radius = np.hypot(w / 2.0, h / 2.0)
 
+        # Does the plane fit its OWN fit region? If not, the scene is not planar
+        # and nothing extrapolated from it means anything. This is the check that
+        # would have caught an earlier run reporting a 5.3 px residual inside the
+        # fit region and a wildly non-monotonic profile outside it.
+        core_residual = float(np.median(residual[core]))
+        print(f"\n  Plane fit quality inside its own fit region: {core_residual:.2f} px "
+              f"({core_residual / max(sigma, 1e-6):.1f}x sigma_d)")
+        if core_residual > 3.0 * max(sigma, 1e-6):
+            print("  The plane does not fit the region it was fitted to, so the surface is not")
+            print("  planar (or the disparity there is unreliable). Not reporting a radial")
+            print("  profile from it -- it could only mislead. Find a genuinely flat, textured")
+            print("  surface and re-run.")
+            print(f"\n  Set in params/vio.yaml:   vio.i_disparity_sigma_px: {sigma:.2f}")
+            return 0
+
         print("\n  Deviation from the fitted plane, by distance from image centre")
         print("  (plane fitted on the central 20% only, then extrapolated outward):")
         print(f"    {'radius':>14}  {'median |resid|':>14}  {'as % of disparity':>18}")
         edges = np.linspace(0.0, max_radius, 7)
+        profile = []
         for lo, hi in zip(edges[:-1], edges[1:]):
             ring = valid & (radius >= lo) & (radius < hi)
             if ring.sum() < 200:
@@ -400,11 +434,23 @@ def cmd_noise(args) -> int:
             med = float(np.median(residual[ring]))
             disp = float(np.median(reference[ring]))
             frac = 100.0 * med / disp if disp > 0.5 else float("nan")
+            profile.append(med)
             print(f"    {100 * lo / max_radius:5.0f}-{100 * hi / max_radius:3.0f}% "
                   f"{med:>14.2f}  {frac:>17.1f}%")
-        print("    Flat profile -> residual is texture and mismatching, model is fine.")
-        print("    Rising profile -> uncorrected distortion; the radius where it passes a few")
-        print("    percent is where to set vio.i_mask_border_fraction.")
+
+        # Distortion rises monotonically with radius. Anything else is not
+        # distortion, whatever else it may be.
+        if len(profile) >= 4:
+            rising = sum(b > a for a, b in zip(profile, profile[1:]))
+            if rising >= len(profile) - 2:
+                print("\n    Profile rises with radius: consistent with uncorrected lens distortion")
+                print("    surviving rectification. Set vio.i_mask_border_fraction to exclude the")
+                print("    radius where it passes a few percent.")
+            else:
+                print("\n    Profile is NOT monotonic in radius, so this is not a distortion")
+                print("    signature -- distortion grows outward without exception. More likely")
+                print("    uneven texture or depth structure in the scene. Do not set a border")
+                print("    mask from this.")
 
     print(f"\n  Set in params/vio.yaml:   vio.i_disparity_sigma_px: {sigma:.2f}")
     print("  (the temporal figure -- the plane-fit residual above is a different quantity)")

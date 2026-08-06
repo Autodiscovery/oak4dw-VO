@@ -663,24 +663,31 @@ one interface.
   | Valid disparity | 13% | low; solved pixels scattered over an 85% bounding box |
   | Alpha scaling 0.0 / 0.5 / 1.0 | no effect on anything | `setAlphaScaling` appears to be a **no-op on RVC4** |
 
-  The plane-fit result is the one that matters. Disparity is linear across a plane
-  only for an ideal rectified pinhole, so an 11× excess over sensor noise says the
-  pinhole model does not describe this rectified pair — roughly 15% depth error
-  from model error alone at the ~1.1 m test range. That is the raw-versus-rectified
-  intrinsics question showing up as a measurement rather than a suspicion, and it
-  is why absolute scale is still not trustworthy.
+  **σ_d is settled well enough.** Two independent runs gave 0.425 and 0.493 px, so
+  ~0.45 px is the right ballpark even though both were measured on low-coverage
+  scenes. `params/vio.yaml` uses 0.425.
 
-  What it does not yet say is *whether* that is uncorrected fisheye distortion.
-  The `noise` subcommand now fits the plane on the central 20% and reports the
-  deviation in rings outward: a flat profile means texture and mismatching, a
-  rising profile means distortion surviving rectification, and the radius where it
-  passes a few percent is where `i_mask_border_fraction` should sit. Worth running
-  before deciding anything larger — the Kannala-Brandt fallback is a big change to
-  reach for on the strength of one aggregate number.
+  **The model-error question is still open, and the measurements so far do not
+  answer it.** A follow-up run on a low-texture wall gave 4.2% valid pixels and a
+  plane-fit residual of 13 px with a wildly non-monotonic radial profile
+  (14.7% → 42.4% → 113.3% → 62.8% → 19.9% → 28.3%). That is not a distortion
+  signature — distortion grows monotonically outward — it is what fitting a plane
+  to scattered fragments at assorted depths produces. The 5.3 px residual *inside
+  the fit region itself* was the tell: if the plane does not fit where it was
+  fitted, nothing extrapolated from it means anything.
 
-  Note the test range matters: at 1.1 m from the wall, a wide lens is at its most
-  non-linear. The same measurement at 3–5 m would likely look better, and typical
-  VO ranges are further out than this test was.
+  The tool now refuses to report that analysis below 40% valid coverage, and checks
+  the fit against its own fit region before extrapolating. It also flags a
+  non-monotonic profile as not-distortion rather than leaving it to be
+  misread as one.
+
+  To actually answer it, the model-error run needs a surface that is **flat *and*
+  textured** — brick, a large poster, newspaper taped to a wall — at 3–5 m rather
+  than ~1 m, since a wide lens is at its most non-linear up close and typical VO
+  ranges are further out. A plain painted wall cannot answer it at any range.
+
+  Until then, absolute scale remains unverified: rotation and trajectory shape are
+  trustworthy, magnitude is not.
 - **DepthAI API details need a compile.** There is no C++ toolchain on the
   machine this was written on, so `stereo_vio_node.cpp` and
   `stereo_vio_pipeline.cpp` are written against the documented v3 API and the
