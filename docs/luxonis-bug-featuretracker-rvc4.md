@@ -59,13 +59,16 @@ reconnect.
 
 | Source | Resolution | Config | Pixel stats into tracker | Features |
 |---|---|---|---|---|
-| Camera CAM_B | 640×400 | defaults | mean 1.0, std 12.5 | 0 |
-| Camera CAM_B | 640×400 | `setHardwareResources(2,2)` | mean 1.0, std 12.5 | 0 |
-| Camera CAM_B | 640×400 | explicit Harris threshold 0.01 | mean 1.0, std 12.5 | 0 |
-| Camera CAM_B | 1280×720 | defaults | mean 1.1, std 13.1 | 0 |
-| Camera CAM_B | 1280×800 | defaults | **mean 69.2, std 57.6** | 0 |
-| StereoDepth `rectifiedLeft` | 640×400 | defaults | mean 4.1, std 4.5 | 0 |
-| StereoDepth `rectifiedLeft` | 1280×800 | `setHardwareResources(2,2)` | **mean 46.8, std 35.3** | 0 |
+| Camera CAM_B | 640×400 | explicit `inputConfig` send | mean 0.6, std 8.2 | 0 |
+| Camera CAM_B | 640×400 | defaults | mean 0.6, std 8.4 | 0 |
+| Camera CAM_B | 640×400 | `setHardwareResources(2,2)` | mean 0.6, std 8.3 | 0 |
+| Camera CAM_B | 640×400 | explicit Harris threshold 0.01 | mean 0.8, std 8.6 | 0 |
+| Camera CAM_B | 1280×720 | defaults | mean 0.9, std 9.0 | 0 |
+| Camera CAM_B | 1280×800 | defaults | **mean 60.7, std 58.0** | 0 |
+| StereoDepth `rectifiedLeft` | 640×400 | defaults | mean 3.1, std 5.2 | 0 |
+| StereoDepth `rectifiedLeft` | 1280×800 | `setHardwareResources(2,2)` | **mean 43.1, std 36.0** | 0 |
+
+Repeated across two independent sweeps with consistent results.
 
 The bolded rows are the important ones: pixel mean ~50–70 with std ~35–58 over
 the full 0–255 range is a normally exposed, well-contrasted image. Harris should
@@ -126,6 +129,33 @@ Two things worth separating here:
 2. Regardless of that, an unsupported input format should be a node-level error,
    not a firmware crash. Rejecting the frame and logging would leave the device
    usable.
+
+## Issue 3 — the documented example calls a method that does not exist
+
+The [FeatureTracker node documentation](https://docs.luxonis.com/software-v3/depthai/depthai-components/nodes/feature_tracker/)
+gives this as its example:
+
+```python
+featureTracker = pipeline.create(dai.node.FeatureTracker)
+featureTracker.setHardwareResources(2, 2)
+featureTracker.setWaitForConfigInput(True)
+```
+
+`setWaitForConfigInput` is not present in the installed Python bindings:
+
+```
+AttributeError: 'depthai.node.FeatureTracker' object has no attribute 'setWaitForConfigInput'
+```
+
+So the documented example cannot run as written, which also means the docs
+cannot be used to check whether a caller is initialising the node correctly.
+
+Sending a `FeatureTrackerConfig` through `inputConfig` explicitly after
+`pipeline.start()` does work as an API call, but changes nothing: still zero
+features, still a firmware crash.
+
+The same page carries no platform compatibility information, so there is no
+documented indication of whether this node is expected to work on RVC4 at all.
 
 ## Impact
 
