@@ -93,8 +93,29 @@
       i_min_disparity_px: 1.5
       i_max_disparity_px: 200.0
       i_max_tracking_error: 30.0
-      # Phase 0. Fraction of each image edge to ignore, where rectification
-      # stretch on the wide lens degrades corner quality.
+      # Left at 0.0 deliberately, despite Phase 0 finding real distortion at the
+      # edges. Two runs at 0.51 m and 0.72 m agree closely on the radial profile of
+      # departure-from-planarity, as a percentage of disparity:
+      #
+      #     radius   0-50%    ~0.5%
+      #     radius  50-67%    0.9-1.3%
+      #     radius 67-100%    2.1-3.1%
+      #
+      # A step at ~67% radius rather than smooth growth, reproducible across two
+      # ranges, which is what uncorrected lens distortion surviving rectification
+      # looks like. Depth error of that size is scale error of that size for
+      # features out there.
+      #
+      # Masking it is not obviously worth it. Excluding everything beyond 67%
+      # radius needs a border fraction of ~0.165, which discards 55% of the pixel
+      # area -- and wide field of view is the main thing this lens is for, being
+      # what makes rotation observable and tracking robust. Meanwhile bucketing
+      # spreads features across the frame, so only some of them carry the 3%, and
+      # the net scale effect is likely ~1%, comparable to VO drift itself.
+      #
+      # So: measure closed-loop drift first. If scale comes out a few percent long
+      # or short, revisit this. Do not pay 55% of the image up front for a fix to a
+      # problem that has not been shown to matter.
       i_mask_border_fraction: 0.0
 
       # ---- CPU feature detection and tracking ----------------------------
@@ -169,17 +190,25 @@
 
       # ---- Noise model ----------------------------------------------------
       i_pixel_sigma_px: 0.3
-      # MEASURED on this device: 0.425 px, from the temporal standard deviation of
-      # disparity per pixel with the camera held still (Phase 0 'noise'). That is
-      # the honest sigma_d -- it assumes nothing about the scene or the camera
-      # model. Spread across pixels was p10 0.075, p90 1.112.
+      # MEASURED: 0.3 px, from the temporal standard deviation of disparity per
+      # pixel with the camera held still. That assumes nothing about the scene or
+      # the camera model, which is what makes it the trustworthy figure.
       #
-      # For contrast, the subpixel quantisation step is 0.031 px, so using that as
-      # the noise would understate it 14x. And the plane-fit residual over a flat
-      # wall was 4.81 px -- 11x this figure -- but that is model error from the
-      # rectified pair not behaving as an ideal pinhole, not sensor noise. Neither
-      # belongs here.
-      i_disparity_sigma_px: 0.425
+      # Readings, best coverage first -- coverage is what decides how much to
+      # believe each one:
+      #     91.5% valid -> 0.301 px   (0.51 m)
+      #     74.2% valid -> 0.266 px   (0.72 m)
+      #      4-13% valid -> 0.425-0.507 px
+      #       0.1% valid -> ~1.0 px   (0.36 m, past the matcher's search limit)
+      #
+      # Note the low-coverage runs read WORSE, not better. The caution in the tool
+      # about them being optimistically biased toward easy pixels turned out to be
+      # backwards: on poor texture the few surviving matches are marginal ones, so
+      # they read noisier. Trust the high-coverage numbers.
+      #
+      # For contrast the subpixel quantisation step is 0.031 px, so using that here
+      # would understate the noise tenfold.
+      i_disparity_sigma_px: 0.3
       # The formal covariance came out ~2.7x over-confident in simulation.
       # Re-derive from real logs once Phase 3 data exists.
       i_covariance_inflation: 3.0

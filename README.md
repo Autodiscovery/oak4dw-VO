@@ -707,31 +707,45 @@ one interface.
   | Valid disparity | 13% | low; solved pixels scattered over an 85% bounding box |
   | Alpha scaling 0.0 / 0.5 / 1.0 | no effect on anything | `setAlphaScaling` appears to be a **no-op on RVC4** |
 
-  **σ_d is settled well enough.** Two independent runs gave 0.425 and 0.493 px, so
-  ~0.45 px is the right ballpark even though both were measured on low-coverage
-  scenes. `params/vio.yaml` uses 0.425.
+  **σ_d = 0.3 px**, from the two runs with good coverage (91.5% → 0.301,
+  74.2% → 0.266). Low-coverage runs read *worse* (0.43–0.51 at 4–13%), not better:
+  on poor texture the few surviving matches are the marginal ones. The tool's
+  earlier caution that low coverage biases σ_d optimistically was backwards.
 
-  **The model-error question is still open, and the measurements so far do not
-  answer it.** A follow-up run on a low-texture wall gave 4.2% valid pixels and a
-  plane-fit residual of 13 px with a wildly non-monotonic radial profile
-  (14.7% → 42.4% → 113.3% → 62.8% → 19.9% → 28.3%). That is not a distortion
-  signature — distortion grows monotonically outward — it is what fitting a plane
-  to scattered fragments at assorted depths produces. The 5.3 px residual *inside
-  the fit region itself* was the tell: if the plane does not fit where it was
-  fitted, nothing extrapolated from it means anything.
+  **There is real distortion surviving rectification, and it is modest.** Two runs
+  on a flat textured surface, at 0.51 m (91.5% coverage) and 0.72 m (74.2%), agree
+  closely on the departure from planarity as a percentage of disparity:
 
-  The tool now refuses to report that analysis below 40% valid coverage, and checks
-  the fit against its own fit region before extrapolating. It also flags a
-  non-monotonic profile as not-distortion rather than leaving it to be
-  misread as one.
+  | Radius from centre | Run A | Run B |
+  |---|---|---|
+  | 0–50% | 0.5–1.1% | 0.4–0.5% |
+  | 50–67% | 1.3% | 0.9% |
+  | **67–100%** | **2.1–3.1%** | **3.0–3.1%** |
 
-  To actually answer it, the model-error run needs a surface that is **flat *and*
-  textured** — brick, a large poster, newspaper taped to a wall — at 3–5 m rather
-  than ~1 m, since a wide lens is at its most non-linear up close and typical VO
-  ranges are further out. A plain painted wall cannot answer it at any range.
+  Reproducible across two ranges, with the plane fitting its own fit region well
+  (1.2–1.4× σ_d) — so the surface really is planar and the departure is the
+  camera's. The rise is a *step* at ~67% radius rather than smooth growth, which
+  matters: extrapolating a centre-fitted plane outward would produce smooth
+  quadratic growth, so a step points at genuine distortion rather than
+  extrapolation artifact. The `noise` command now also refits over the whole image
+  to control for that directly.
 
-  Until then, absolute scale remains unverified: rotation and trajectory shape are
-  trustworthy, magnitude is not.
+  Depth error of that size is scale error of that size, for features in those
+  rings. **This is nothing like the 15% the earlier broken measurement suggested.**
+
+  `i_mask_border_fraction` stays at **0.0** deliberately. Excluding everything past
+  67% radius needs a border of ~0.165, discarding **55% of the pixel area** — and
+  wide field of view is the main thing this lens is for, being what makes rotation
+  observable and tracking robust. With bucketing spreading features across the
+  frame, only some carry the 3%, so the net scale effect is likely ~1%: comparable
+  to VO drift itself. Measure closed-loop drift first; if scale comes out a few
+  percent long or short, revisit. Don't pay 55% of the image up front for a fix to
+  a problem not yet shown to matter.
+
+  One caveat for interpretation: rectification error is roughly constant in
+  *pixels* while disparity shrinks with range, so the same error is a larger
+  percentage further away. Percentages measured at 0.5–0.7 m are optimistic for the
+  ranges the VO actually works at.
 - **DepthAI API details need a compile.** There is no C++ toolchain on the
   machine this was written on, so `stereo_vio_node.cpp` and
   `stereo_vio_pipeline.cpp` are written against the documented v3 API and the

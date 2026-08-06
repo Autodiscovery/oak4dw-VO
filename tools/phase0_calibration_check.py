@@ -381,15 +381,24 @@ def cmd_noise(args) -> int:
     # matched. Near range also has large occlusion zones where the two views do
     # not overlap at all. Both show up as low coverage that looks like a texture
     # problem and is not.
-    if median_disparity > 80.0:
+    if median_disparity > 80.0 and validity < 0.50:
+        # Both conditions matter. High disparity alone is not a problem -- the
+        # matcher can work right up to its limit given texture. It is high
+        # disparity WITH poor coverage that means the search range is the binding
+        # constraint. An earlier version warned on disparity alone and told a run
+        # with 91.5% coverage that "most of the frame cannot be matched", which
+        # was flatly contradicted by the number printed directly above it.
         near_limit = (fx_baseline / 95.0) if fx_baseline else 0.0
         print(f"\n  TOO CLOSE. A median disparity of {median_disparity:.0f} px is at or past the matcher's")
-        print("  search limit (~95 px without extended disparity), so most of the frame cannot be")
-        print("  matched at all and the coverage figure above says nothing about the scene.")
+        print(f"  search limit (~95 px without extended disparity), and only {100.0 * validity:.1f}% of pixels")
+        print("  matched -- the search range is what is limiting you, not the scene.")
         if near_limit:
             print(f"  Minimum workable range here is about {near_limit:.2f} m.")
-        print("  Move back to 2-5 m and re-run. That is also where the VO actually operates, so")
-        print("  sigma_d measured there is the figure worth having.")
+        print("  Move back to 2-5 m and re-run.")
+    elif median_disparity > 80.0:
+        print(f"\n  Note: close range ({median_disparity:.0f} px disparity), but coverage is fine, so the")
+        print("  matcher is coping. Worth repeating at 2-5 m all the same -- that is where the VO")
+        print("  operates, and both noise and rectification error can behave differently there.")
     elif median_disparity < 3.0:
         print(f"\n  Very far ({median_disparity:.1f} px disparity). Disparity noise is a larger share of")
         print("  the signal out here, so this will read pessimistically. 2-5 m is the useful range.")
@@ -487,19 +496,59 @@ def cmd_noise(args) -> int:
             print(f"    {100 * lo / max_radius:5.0f}-{100 * hi / max_radius:3.0f}% "
                   f"{med:>14.2f}  {frac:>17.1f}%")
 
-        # Distortion rises monotonically with radius. Anything else is not
-        # distortion, whatever else it may be.
-        if len(profile) >= 4:
+        # A rising profile is necessary evidence of distortion but not sufficient,
+        # because extrapolating a plane fitted on the central 20% out to the
+        # corners amplifies ANY small model mismatch with distance -- so a rise is
+        # partly expected even from a perfect camera. Control for it by fitting the
+        # same plane over the WHOLE image and looking again. If the residual
+        # collapses, the rise was extrapolation error. If it survives, the
+        # disparity field genuinely is not planar and the lens model is at fault.
+        A_all = np.column_stack([xs[valid], ys[valid], np.ones(int(valid.sum()))])
+        coeffs_all, *_ = np.linalg.lstsq(A_all, reference[valid], rcond=None)
+        predicted_all = coeffs_all[0] * xs + coeffs_all[1] * ys + coeffs_all[2]
+        residual_all = np.abs(reference - predicted_all)
+
+        print("\n  Same thing with the plane fitted over the WHOLE image, which removes the")
+        print("  extrapolation effect and isolates genuine departure from planarity:")
+        print(f"    {'radius':>14}  {'median |resid|':>14}  {'as % of disparity':>18}")
+        global_profile = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            ring = valid & (radius >= lo) & (radius < hi)
+            if ring.sum() < 200:
+                continue
+            med = float(np.median(residual_all[ring]))
+            disp = float(np.median(reference[ring]))
+            frac = 100.0 * med / disp if disp > 0.5 else float("nan")
+            global_profile.append((med, frac))
+            print(f"    {100 * lo / max_radius:5.0f}-{100 * hi / max_radius:3.0f}% "
+                  f"{med:>14.2f}  {frac:>17.1f}%")
+
+        if len(profile) >= 4 and global_profile:
             rising = sum(b > a for a, b in zip(profile, profile[1:]))
-            if rising >= len(profile) - 2:
-                print("\n    Profile rises with radius: consistent with uncorrected lens distortion")
-                print("    surviving rectification. Set vio.i_mask_border_fraction to exclude the")
-                print("    radius where it passes a few percent.")
-            else:
-                print("\n    Profile is NOT monotonic in radius, so this is not a distortion")
+            worst_global = max(f for _, f in global_profile)
+            monotonic = rising >= len(profile) - 2
+
+            print()
+            if not monotonic:
+                print("    Centre-fit profile is NOT monotonic, so this is not a distortion")
                 print("    signature -- distortion grows outward without exception. More likely")
-                print("    uneven texture or depth structure in the scene. Do not set a border")
-                print("    mask from this.")
+                print("    uneven texture or depth structure. Do not set a border mask from this.")
+            elif worst_global < 1.0:
+                print(f"    Centre-fit profile rises, but the global fit stays under {worst_global:.1f}% everywhere.")
+                print("    The rise was mostly extrapolation error, not lens distortion: a plane")
+                print("    fitted across the whole image describes the disparity field well. No")
+                print("    border mask needed, and the pinhole model is adequate.")
+            else:
+                print(f"    Rising under both fits, worst {worst_global:.1f}% of disparity under the global fit.")
+                print("    That is real: the disparity field departs from planarity toward the edges,")
+                print("    which is uncorrected lens distortion surviving rectification. A depth error")
+                print("    of that size is also a scale error of that size for features out there.")
+                print("    Set vio.i_mask_border_fraction to exclude the outer rings, and weigh that")
+                print("    against the field of view it costs.")
+            print("\n    Caveat worth keeping: rectification error is roughly constant in PIXELS,")
+            print("    while disparity shrinks with range -- so the same error is a larger")
+            print("    percentage further away. Percentages measured this close are optimistic")
+            print("    for the ranges the VO actually works at.")
 
     print(f"\n  Set in params/vio.yaml:   vio.i_disparity_sigma_px: {sigma:.2f}")
     print("  (the temporal figure -- the plane-fit residual above is a different quantity)")
