@@ -558,6 +558,12 @@ with no stereo node at all** refuses the frame rate identically and reaches only
 together, that was worth ruling out before blaming the device — measured with
 `tools/probe_frame_rate.py`.
 
+All three API routes to a frame rate were tried against the bindings' actual
+signatures: `build(sensorFps=...)` raises, while `requestOutput(fps=...)` and
+`ImgFrameCapability.fps.fixed()` both accept the value and silently ignore it.
+The rate is externally fixed, and the measured value drifts between runs (9.4,
+9.6, 9.9 Hz), which fits an asynchronous external clock.
+
 To actually raise the rate, the FSYNC configuration has to change on the device —
 check whether anything is driving the M8 auxiliary connector. Written up in
 [docs/luxonis-bug-fsync-fps-lock.md](docs/luxonis-bug-fsync-fps-lock.md), which

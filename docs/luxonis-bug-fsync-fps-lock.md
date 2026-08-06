@@ -1,27 +1,10 @@
 # Bug report: OAK 4 D W locked to 10 FPS by external FSYNC slave mode
 
-**One check outstanding before filing.** Two of the three ways to ask for a frame
-rate are confirmed blocked — `build(sensorFps=...)` raises and
-`requestOutput(fps=...)` is silently ignored. The third, declaring the rate on an
-`ImgFrameCapability` and passing that to `requestOutput`, is a different code path
-and has not been tested:
+Ready to file at <https://github.com/luxonis/depthai-core/issues>.
 
-```python
-cap = dai.ImgFrameCapability()
-cap.size.fixed((1280, 800))
-cap.fps.fixed(30)
-stream = cam.requestOutput(cap)
-```
-
-`tools/probe_frame_rate.py` now covers it. If that route works, the rate is
-settable after all and this report should be rewritten as an API-consistency
-issue — two routes refusing what a third permits — rather than a hard cap.
-
-Verified as device-level and not caused by our pipeline: a **single camera with no
-stereo node at all** refuses the frame rate identically. See the isolation table
-below.
-
-Filing target: <https://github.com/luxonis/depthai-core/issues>
+All three routes to the frame rate have been tested against the bindings' actual
+signatures, and a single camera with no stereo node behaves identically to the full
+stereo pipeline. See the tables below.
 
 ## Summary
 
@@ -95,6 +78,36 @@ RPC 'startPipeline' failed: Cannot override fps while using external FSYNC slave
 Omitting `sensorFps` lets the pipeline start, and the delivered rate is then
 **~10 Hz** regardless of everything else.
 
+### All three routes to the frame rate
+
+Every API route that can express a frame rate was tried, using the overload
+signatures reported by the bindings themselves rather than guessed:
+
+| Route | Result | Rate |
+|---|---|---|
+| `build(..., sensorFps=30)` | **raises** `Cannot override fps while using external FSYNC slave mode` | — |
+| `requestOutput(size, ..., fps=30)` | accepted, **no effect, no diagnostic** | 9.9 Hz |
+| `ImgFrameCapability` with `fps.fixed(30)`, via `requestOutput(capability, onHost)` | accepted, **no effect, no diagnostic** | 9.9 Hz |
+| Same capability route with `fps.fixed(60)` | accepted, **no effect, no diagnostic** | 9.9 Hz |
+
+So one route reports the restriction and two silently ignore it. The two silent
+ones are the more damaging: with no error and no warning, the only way to discover
+the cap is to measure the delivered rate and notice it does not match the request.
+
+Relevant signatures on depthai 3.8.0, for reference:
+
+```
+build(self, boardSocket, sensorResolution: Optional[tuple[int,int]] = None,
+      sensorFps: Optional[float] = None) -> Camera
+requestOutput(self, size, type=None, resizeMode=..., fps: Optional[float] = None,
+              enableUndistortion=None) -> Node.Output
+requestOutput(self, capability: Capability, onHost: bool) -> Node.Output
+```
+
+The measured rate varies slightly between runs — 9.4, 9.6 and 9.9 Hz across
+otherwise identical pipelines — which is itself consistent with an asynchronous
+external clock rather than an internal divider off the sensor clock.
+
 ### Isolation: not caused by the stereo pair
 
 Because a stereo pair legitimately needs FSYNC to expose both sensors together, we
@@ -151,11 +164,15 @@ may be related to why the device believes it is an external slave.
 4. **Is 10 FPS a documented fallback** for external slave mode with no incoming
    pulses? If a slave with no master free-runs at a fixed rate, that behaviour and
    the rate should be documented, and ideally warned about at pipeline start.
-5. **`requestOutput`'s `fps` argument should not be silently ignored.** Either
-   honour it or raise, as `build(sensorFps=...)` already does. A silent no-op is
-   the hardest possible version of this to diagnose — it cost us several
-   debugging cycles chasing exposure, bandwidth and message-sync explanations
-   before measuring per-stage rates revealed the camera itself as the source.
+5. **The two silent routes should not be silent.** `requestOutput(fps=...)` and
+   `ImgFrameCapability.fps.fixed(...)` both accept a rate and ignore it without
+   any diagnostic, while `build(sensorFps=...)` raises for the same underlying
+   reason. Consistency in either direction would help; raising is more useful
+   than a no-op. As it stands, a caller using either of the silent routes has no
+   way to learn the rate was refused except by measuring the delivered frame rate
+   and noticing it does not match. That cost us several debugging cycles chasing
+   exposure, bandwidth and message-sync explanations before per-stage rate
+   measurement pointed at the camera itself.
 
 ## Impact
 
