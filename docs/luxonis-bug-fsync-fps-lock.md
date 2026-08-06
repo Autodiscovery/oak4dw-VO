@@ -1,20 +1,10 @@
 # Bug report: OAK 4 D W locked to 10 FPS by external FSYNC slave mode
 
-**Not yet ready to file.** One thing has to be checked first, because it could
-change the whole framing: does a *single* camera on this device accept a frame
-rate? If it does and only the stereo pair refuses, then the sync mode is being
-selected when the pair is configured — which makes this a depthai
-stereo-configuration issue, or our own misuse of it, rather than a device sitting
-in a bad state. Run:
+Ready to file at <https://github.com/luxonis/depthai-core/issues>.
 
-```bash
-python3 tools/probe_frame_rate.py --device <ip>
-```
-
-If even one bare camera refuses, this report stands as written. If only the pair
-refuses, rewrite the summary accordingly before filing.
-
-Filing target: <https://github.com/luxonis/depthai-core/issues>
+Verified as device-level and not caused by our pipeline: a **single camera with no
+stereo node at all** refuses the frame rate identically. See the isolation table
+below.
 
 ## Summary
 
@@ -64,6 +54,8 @@ device reporting **external** slave mode when there is no external source.
 
 ## Steps to reproduce
 
+A single camera is enough. No stereo, no other nodes:
+
 ```python
 import depthai as dai
 
@@ -71,7 +63,9 @@ with dai.Pipeline(dai.Device()) as pipeline:
     cam = pipeline.create(dai.node.Camera).build(
         dai.CameraBoardSocket.CAM_B, sensorResolution=(1280, 800), sensorFps=30.0
     )
-    cam.requestOutput((1280, 800), type=dai.ImgFrame.Type.GRAY8, fps=30.0)
+    queue = cam.requestOutput(
+        (1280, 800), type=dai.ImgFrame.Type.GRAY8, fps=30.0
+    ).createOutputQueue()
     pipeline.start()   # throws
 ```
 
@@ -82,7 +76,24 @@ RPC 'startPipeline' failed: Cannot override fps while using external FSYNC slave
 ```
 
 Omitting `sensorFps` lets the pipeline start, and the delivered rate is then
-**exactly 10.0 Hz** regardless of everything else.
+**~10 Hz** regardless of everything else.
+
+### Isolation: not caused by the stereo pair
+
+Because a stereo pair legitimately needs FSYNC to expose both sensors together, we
+checked whether requesting a pair is what selects the sync mode. It is not:
+
+| Pipeline | `sensorFps` | Result |
+|---|---|---|
+| One camera (CAM_B only) | not set | starts, **9.9 Hz** |
+| One camera (CAM_B only) | 30 | **rejected**, FSYNC slave mode |
+| Stereo pair + StereoDepth | not set | starts, **9.9 Hz** |
+| Stereo pair + StereoDepth | 30 | **rejected**, FSYNC slave mode |
+
+One bare camera behaves identically to the full stereo pipeline, so the device is
+in external FSYNC slave mode independently of what the pipeline contains.
+
+Reproducible with `tools/probe_frame_rate.py --device <ip>` in this repository.
 
 ## Evidence that 10 Hz is a hard external cap, not a bottleneck
 
@@ -93,6 +104,7 @@ Each of these was measured rather than assumed:
 | 10.0 Hz at 1280×800 **and** at 640×400, unchanged | Not a throughput or bandwidth limit. A rate that does not move with a 4× change in pixel count is not a bottleneck. |
 | Exposure 8.3 ms, ISO 288 | Not auto-exposure. 30 FPS permits 33 ms; AE is using a quarter of that. |
 | Camera, StereoDepth, ImageManip and downstream stages **all** measured at 10.0 Hz | Nothing downstream is back-pressuring. The camera is the source. |
+| A single camera with no stereo node reaches only 9.9 Hz and refuses `sensorFps` identically | Not caused by the stereo pair configuration, and not something our pipeline induces. |
 | `requestOutput(..., fps=30)` accepted without complaint, still 10 Hz | The fps argument has no effect in this state and no diagnostic is emitted. |
 
 A related symptom, from a separate failure on this device:

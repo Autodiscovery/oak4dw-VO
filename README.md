@@ -552,10 +552,17 @@ window (every pipeline stage measured at 10 Hz, so the camera was the source).
 The `FsyncController` ioctl error in an early probe log was pointing at it all
 along and was not followed up.
 
+Confirmed to be device-level rather than anything this app does: **a single camera
+with no stereo node at all** refuses the frame rate identically and reaches only
+9.9 Hz. Since a stereo pair does legitimately need FSYNC to expose both sensors
+together, that was worth ruling out before blaming the device — measured with
+`tools/probe_frame_rate.py`.
+
 To actually raise the rate, the FSYNC configuration has to change on the device —
-check whether anything is driving the M8 auxiliary connector. At 10 Hz the VO
-works but has less inter-frame overlap to work with, which matters most under
-fast rotation.
+check whether anything is driving the M8 auxiliary connector. Written up in
+[docs/luxonis-bug-fsync-fps-lock.md](docs/luxonis-bug-fsync-fps-lock.md), which
+reproduces in eight lines with one camera. At 10 Hz the VO works but has less
+inter-frame overlap, which matters most under fast rotation.
 
 Next up: the closed-loop drift test, and Phase 0 `rectify` to settle absolute
 scale.

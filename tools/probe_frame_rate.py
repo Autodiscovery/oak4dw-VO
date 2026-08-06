@@ -78,6 +78,14 @@ def run_variant(ip, *, label, cameras, use_stereo, set_fps, fps, seconds):
 
             outputs = [c.requestOutput(SENSOR, type=dai.ImgFrame.Type.GRAY8, fps=fps) for c in built]
 
+            # Every requested output must be linked or queued -- depthai rejects a
+            # dangling one with "Always call output->createOutputQueue() or
+            # output->link()". The two-camera-no-stereo variant left the second
+            # output unused and failed on that rather than on anything about FSYNC.
+            spare_queues = []
+            if not use_stereo:
+                spare_queues = [out.createOutputQueue(1, False) for out in outputs[1:]]
+
             if use_stereo:
                 stereo = pipeline.create(dai.node.StereoDepth)
                 stereo.setRectification(True)
@@ -100,6 +108,8 @@ def run_variant(ip, *, label, cameras, use_stereo, set_fps, fps, seconds):
             while time.time() < deadline and pipeline.isRunning():
                 if measured.tryGet() is not None:
                     frames += 1
+                for spare in spare_queues:
+                    spare.tryGet()  # keep unused outputs drained
                 time.sleep(0.002)
     except Exception as exc:  # noqa: BLE001 - a rejected variant is the result
         error = str(exc).splitlines()[0]
