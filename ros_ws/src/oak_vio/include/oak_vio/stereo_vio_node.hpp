@@ -16,18 +16,18 @@
 #include <vector>
 
 #include <depthai/depthai.hpp>
-#include <depthai_ros_driver/dai_nodes/base_node.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <oak_vio_msgs/msg/vio_status.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "oak_vio/driver_compat.hpp"
 #include "oak_vio/stereo_vio.hpp"
 
 namespace oak_vio {
 
-class StereoVioNode : public depthai_ros_driver::dai_nodes::BaseNode {
+class StereoVioNode : public DriverBaseNode {
    public:
     StereoVioNode(const std::string& daiNodeName,
                   std::shared_ptr<rclcpp::Node> node,

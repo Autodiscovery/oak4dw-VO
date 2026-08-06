@@ -14,18 +14,17 @@
 #include <vector>
 
 #include <depthai/depthai.hpp>
-#include <depthai_ros_driver/dai_nodes/base_node.hpp>
-#include <depthai_ros_driver/pipeline/base_pipeline.hpp>
 #include <pluginlib/class_list_macros.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include "oak_vio/driver_compat.hpp"
 #include "oak_vio/stereo_vio_node.hpp"
 
 namespace oak_vio {
 
-class StereoVioPipeline : public depthai_ros_driver::pipeline_gen::BasePipeline {
+class StereoVioPipeline : public DriverBasePipeline {
    public:
-    std::vector<std::unique_ptr<depthai_ros_driver::dai_nodes::BaseNode>> createPipeline(
+    std::vector<std::unique_ptr<DriverBaseNode>> createPipeline(
         std::shared_ptr<rclcpp::Node> node,
         std::shared_ptr<dai::Device> device,
         std::shared_ptr<dai::Pipeline> pipeline,
@@ -37,7 +36,7 @@ class StereoVioPipeline : public depthai_ros_driver::pipeline_gen::BasePipeline 
         (void)ph;
         (void)nnType;
 
-        std::vector<std::unique_ptr<depthai_ros_driver::dai_nodes::BaseNode>> nodes;
+        std::vector<std::unique_ptr<DriverBaseNode>> nodes;
         nodes.emplace_back(std::make_unique<StereoVioNode>("vio", node, pipeline, deviceName, rsCompat));
 
         RCLCPP_INFO(node->get_logger(), "oak_vio: stereo VO pipeline created");
@@ -53,4 +52,8 @@ class StereoVioPipeline : public depthai_ros_driver::pipeline_gen::BasePipeline 
 
 }  // namespace oak_vio
 
+// Deliberately spelled out rather than using oak_vio::DriverBasePipeline: this
+// string must match `base_class_type` in plugins.xml exactly, and pluginlib
+// resolves that by name at runtime. If the diagnostic shows the driver uses a
+// different namespace, both this line and plugins.xml need the same edit.
 PLUGINLIB_EXPORT_CLASS(oak_vio::StereoVioPipeline, depthai_ros_driver::pipeline_gen::BasePipeline)
