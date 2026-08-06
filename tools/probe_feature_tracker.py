@@ -70,7 +70,7 @@ def stats(frame) -> tuple[float, float, int, int]:
 
 
 def run_variant(ip, *, source, width, height, fps, hw_resources, threshold,
-                num_target, seconds, label):
+                num_target, seconds, label, send_config=False, wait_for_config=False):
     device = connect(ip)
     counts: list[int] = []
     frame_stats: list[tuple[float, float, int, int]] = []
@@ -114,12 +114,30 @@ def run_variant(ip, *, source, width, height, fps, hw_resources, threshold,
                 tracker.initialConfig.setNumTargetFeatures(num_target)
             if hw_resources is not None:
                 tracker.setHardwareResources(hw_resources, hw_resources)
+
+            # The documented example calls setWaitForConfigInput(true) and feeds
+            # inputConfig, rather than relying on initialConfig being applied at
+            # start. We never did either. Unlikely to be the fault -- a node
+            # waiting on config would emit nothing rather than empty messages,
+            # and it would not assert on its hardware session -- but it is in the
+            # official example and cheap to rule out.
+            if wait_for_config:
+                tracker.setWaitForConfigInput(True)
+            config_queue = tracker.inputConfig.createInputQueue() if (send_config or wait_for_config) else None
+
             manip.out.link(tracker.inputImage)
 
             feature_queue = tracker.outputFeatures.createOutputQueue(4, False)
             input_queue = manip.out.createOutputQueue(2, False)
 
             pipeline.start()
+
+            if config_queue is not None:
+                config = dai.FeatureTrackerConfig()
+                config.setCornerDetector(dai.FeatureTrackerConfig.CornerDetector.Type.HARRIS)
+                config.setNumTargetFeatures(num_target)
+                config.setMotionEstimator(True)
+                config_queue.send(config)
             deadline = time.time() + seconds
             while time.time() < deadline and pipeline.isRunning():
                 features = feature_queue.tryGet()
@@ -171,6 +189,10 @@ def main() -> int:
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument("--num-target", type=int, default=320)
     parser.add_argument("--seconds", type=float, default=6.0)
+    parser.add_argument("--send-config", action="store_true",
+                        help="Send a FeatureTrackerConfig via inputConfig after start.")
+    parser.add_argument("--wait-for-config", action="store_true",
+                        help="setWaitForConfigInput(true) and send a config, as the docs example does.")
     parser.add_argument("--sweep", action="store_true")
     args = parser.parse_args()
 
@@ -180,10 +202,20 @@ def main() -> int:
         ok, _ = run_variant(args.device, source=args.source, width=args.width, height=args.height,
                             fps=args.fps, hw_resources=args.hw_resources, threshold=args.threshold,
                             num_target=args.num_target, seconds=args.seconds,
+                            send_config=args.send_config, wait_for_config=args.wait_for_config,
                             label=f"{args.source} {args.width}x{args.height}")
         return 0 if ok else 1
 
     variants = [
+        # The two documented-example variants first: setWaitForConfigInput plus an
+        # explicit inputConfig send is the one API path never tried, and it is
+        # what the official docs example actually does.
+        ("docs example: setWaitForConfigInput + config send",
+         dict(source="camera", width=640, height=400, hw_resources=2, threshold=None,
+              send_config=True, wait_for_config=True)),
+        ("explicit config send, no wait flag",
+         dict(source="camera", width=640, height=400, hw_resources=2, threshold=None,
+              send_config=True, wait_for_config=False)),
         ("camera 640x400, defaults",
          dict(source="camera", width=640, height=400, hw_resources=None, threshold=None)),
         ("camera 640x400 + hwResources(2,2)",
