@@ -493,6 +493,41 @@ header first — neural depth is smoothed and partly inferred, which is good for
 dense perception and less good for VO, where a locally biased depth at a
 feature becomes a biased pose.
 
+## Status
+
+Working on hardware as of 2026-08-06. First clean run, camera stationary for
+20 s at 640×400:
+
+| | |
+|---|---|
+| Tracking state | `TRACKING` 100% of frames |
+| Feature funnel | 148 observed → 141 matched → 127 bucketed → **126 inliers** |
+| Inlier ratio | median 1.00 |
+| Stationary drift | **1.5 mm over 20 s** |
+| Estimator cost | 0.56 ms median, 0.61 ms p95 |
+| Covariance | accumulating correctly, trace 2.0e-6 → 5.0e-6 |
+
+Millimetre-scale drift while still is the result that matters: it says the
+disparity handling carries no systematic bias, which is what the whole
+depth-uncertainty weighting exercise was for.
+
+Two caveats on those numbers. The inlier ratio of 1.00 means RANSAC is not being
+exercised — stationary, everything is consistent, and the forward-backward check
+already removes bad tracks upstream. A moving test is far more informative. And
+`median parallax 0.0 px` is expected when still, which is why keyframes were
+promoted only by the age limit (7 in 200 frames, matching
+`i_keyframe_max_age_frames: 30`).
+
+**Still open:** the sensor delivers 10 Hz against 30 requested, which halves the
+VO rate. Not auto-exposure (8.3 ms) and not a throughput limit — the rate is
+identical at 1280×800 and 640×400. Latest theory, now implemented: FPS has to be
+passed to `Camera::build()`, whose third parameter is the sensor frame rate,
+rather than to `requestOutput()`, which is already known to ignore its
+pixel-format argument on this device.
+
+Next up: the closed-loop drift test, and Phase 0 `rectify` to settle absolute
+scale.
+
 ## Blocker: the RVC4 hardware feature tracker does not work
 
 **Status as of 2026-08-06: `dai::node::FeatureTracker` is non-functional on this

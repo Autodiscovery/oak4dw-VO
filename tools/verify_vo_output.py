@@ -141,10 +141,11 @@ def main() -> int:
     check(rate_ok, "rate is close to the configured FPS",
           f"{rate:.1f} Hz vs {args.expected_fps:.0f} configured")
     if not rate_ok:
-        print("         A rate well below the configured FPS usually means the Sync node is")
-        print("         dropping pairs whose disparity and feature timestamps skew outside its")
-        print("         window. The app logs the window at startup ('VO sync window: N ms');")
-        print("         widen it by lowering vio.i_fps or rebuild with a larger multiplier.")
+        print("         Compare against the 'camera N Hz' figure in the app's periodic log. If the")
+        print("         camera itself is below the requested rate then the sensor is the limit, not")
+        print("         the pipeline -- widening the sync window will not help. If the camera is at")
+        print("         the requested rate but this is not, then Sync is dropping pairs whose")
+        print("         timestamps skew outside its window.")
 
     # Gaps point at dropped frames or a stalled estimator.
     gaps = [b[0] - a[0] for a, b in zip(node.odom, node.odom[1:])]

@@ -200,8 +200,19 @@ VioParams StereoVioNode::readParams() {
 
 void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     // ---- Cameras ---------------------------------------------------------
-    leftCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_B);
-    rightCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_C);
+    // FPS goes to build(), not just requestOutput().
+    //
+    // build()'s third parameter is the SENSOR frame rate:
+    //     build(CameraBoardSocket, optional<pair<uint32_t,uint32_t>> size, optional<float> fps)
+    // whereas requestOutput's fps only asks for an output stream rate. Passing it
+    // to requestOutput alone left the sensor at 10 Hz against 30 requested,
+    // identically at 1280x800 and at 640x400 -- a rate that does not move with
+    // resolution is not a throughput limit. requestOutput is already known to
+    // ignore its pixel-format argument on this device, so it ignoring fps too is
+    // the parsimonious explanation.
+    const auto sensorFps = static_cast<float>(fps_);
+    leftCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_B, std::nullopt, sensorFps);
+    rightCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_C, std::nullopt, sensorFps);
 
     // Deliberately not requesting a pixel format. requestOutput ignores the
     // request on this device and returns NV12 regardless -- a silent
