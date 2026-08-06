@@ -232,7 +232,37 @@ oakctl app run . --env OAK_ROS_PEER=<your-host-ip>
 discovery usually works on a normal LAN but fails silently when it doesn't, and
 it's the single most common cause of "the topics never showed up".
 
-On the host:
+### Verifying the output from the host
+
+Once the app logs `Driver ready!`, run the smoke test on the Jazzy machine.
+Start with the camera **stationary** — it is the strongest early test, because
+any drift while still is a real bias rather than accumulation:
+
+```bash
+python3 tools/verify_vo_output.py --duration 20 --stationary
+```
+
+Then pick the camera up and repeat without the flag:
+
+```bash
+python3 tools/verify_vo_output.py --duration 20
+```
+
+It checks publish rate and gaps, frame ids, covariance finiteness and growth,
+stationary drift or response to motion, and — if `oak_vio_msgs` is on the host
+— tracking state, inlier ratio, solve time, and the feature funnel
+(`observed → matched → bucketed → inlier`), which is the quickest way to see
+*where* features are being lost. Failures come with an interpretation guide.
+
+`oak_vio_msgs` is built on the device, so the host will not have it by default.
+Everything essential works without it; for the richer checks, build just that
+package here:
+
+```bash
+cd ros_ws && colcon build --packages-select oak_vio_msgs && source install/setup.bash
+```
+
+Manual equivalents, if you prefer the CLI:
 
 ```bash
 ros2 topic hz /oak/vo/odometry
@@ -465,11 +495,22 @@ feature becomes a biased pose.
 
 ## Known gaps
 
-- **Phase 0 has not been run.** Every optics-derived number here comes from the
-  published FoV spec, not from your device. The lens is almost certainly an
-  equidistant fisheye (f ≈ 577 px fits both axes to 0.2%, while a pinhole model
-  disagrees across axes by 34%), so pinhole rectification will cost field of
-  view. How much is a measurement, not a calculation.
+- **The camera model may be reading raw fisheye intrinsics, not rectified
+  ones.** First run on real hardware reported `fx=567.63 fy=567.62 cx=631.42
+  cy=419.17`. Under an equidistant fisheye model that is a 129° HFoV, matching
+  the datasheet's 127° almost exactly — and it confirms the prediction made
+  from the spec sheet (f ≈ 577 px, within 1.6%). But the estimator assumes a
+  **rectified pinhole**, and the same `fx` read as a pinhole gives a
+  plausible-looking 97° HFoV, which is exactly what makes this insidious: the
+  trajectory comes out the right shape at the wrong scale. `readCameraModel()`
+  now logs both interpretations and warns when the numbers look raw. Resolve it
+  with Phase 0 `rectify` and by comparing against the driver's rectified
+  `camera_info`. **Do not trust absolute scale until this is settled** —
+  rotation and trajectory shape are unaffected.
+- **Phase 0 has not been run.** Other than the intrinsics above, every
+  optics-derived number here comes from the published FoV spec rather than your
+  device. Pinhole rectification of this lens will cost field of view; how much
+  is a measurement, not a calculation.
 - **DepthAI API details need a compile.** There is no C++ toolchain on the
   machine this was written on, so `stereo_vio_node.cpp` and
   `stereo_vio_pipeline.cpp` are written against the documented v3 API and the

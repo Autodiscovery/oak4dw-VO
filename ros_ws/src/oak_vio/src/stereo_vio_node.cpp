@@ -234,6 +234,28 @@ RectifiedCamera StereoVioNode::readCameraModel(const std::shared_ptr<dai::Device
 
     const RectifiedCamera camera(fx, fy, cx, cy, baselineMetres);
 
+    // Raw sensor intrinsics and rectified intrinsics are easy to confuse here,
+    // and confusing them yields a trajectory of plausible shape and wrong
+    // scale. The tell is which projection model the numbers are consistent
+    // with: a fisheye has fx ~= fy and an equidistant FoV matching the
+    // datasheet, whereas a rectified pinhole has a noticeably smaller implied
+    // FoV. Log both readings so the ambiguity is visible rather than silent.
+    const double halfWidth = 0.5 * width_;
+    const double hfovPinhole = 2.0 * std::atan(halfWidth / fx) * 180.0 / M_PI;
+    const double hfovEquidistant = 2.0 * (halfWidth / fx) * 180.0 / M_PI;
+    RCLCPP_INFO(getLogger(),
+                "  implied HFoV: %.1f deg if pinhole, %.1f deg if equidistant fisheye",
+                hfovPinhole,
+                hfovEquidistant);
+    if(hfovEquidistant > 110.0 && std::abs(fx - fy) < 0.02 * fx) {
+        RCLCPP_WARN(getLogger(),
+                    "  These look like RAW fisheye intrinsics (fx ~= fy, equidistant HFoV %.0f deg "
+                    "matches the datasheet), not rectified pinhole intrinsics. The estimator assumes "
+                    "a rectified pinhole. Run tools/phase0_calibration_check.py rectify and compare "
+                    "against the driver's rectified camera_info before trusting absolute scale.",
+                    hfovEquidistant);
+    }
+
     // State the depth precision this configuration actually gives, so nobody
     // has to rediscover it from a drifting trajectory. Note this uses the
     // disparity *noise*, not the subpixel quantisation step.
