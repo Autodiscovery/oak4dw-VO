@@ -493,6 +493,45 @@ header first — neural depth is smoothed and partly inferred, which is good for
 dense perception and less good for VO, where a locally biased depth at a
 feature becomes a biased pose.
 
+## Blocker: the RVC4 hardware feature tracker does not work
+
+**Status as of 2026-08-06: `dai::node::FeatureTracker` is non-functional on this
+OAK-4-D-W firmware.** It returns zero features for every configuration tried,
+throws `DS: Assert (hSession != NULL)` — it is failing to acquire its hardware
+session — and takes the device firmware down with it.
+
+This was established by measurement, not inference. `tools/probe_feature_tracker.py`
+sweeps camera-direct and rectified sources across 640×400, 1280×720 and
+1280×800, with and without `setHardwareResources`, with default and explicit
+Harris thresholds, and reports pixel statistics for the exact frames entering
+the tracker:
+
+| Source | Resolution | Pixels into tracker | Features |
+|---|---|---|---|
+| Camera | 1280×800 | mean 69.2, std 57.6 | **0** |
+| rectifiedLeft | 1280×800 | mean 46.8, std 35.3 | **0** |
+
+Normally exposed, well-contrasted images; zero corners. Meanwhile `StereoDepth`
+on the same pair produces healthy disparity at ~40% valid pixels, so the sensors
+and rectification are fine.
+
+A separate defect found alongside it: `Camera::requestOutput(..., GRAY8, ...)`
+silently returns NV12, and feeding NV12 to the tracker crashes the firmware
+rather than erroring.
+
+Written up in [docs/luxonis-bug-featuretracker-rvc4.md](docs/luxonis-bug-featuretracker-rvc4.md),
+ready to file once the two version numbers are filled in.
+
+**Consequence for this design.** The plan's cost argument rested on the RVC4
+doing Harris and Lucas-Kanade in fixed-function hardware for free. That is
+currently unavailable, so the front-end has to move to the ARM cores — roughly
+25 ms/frame that was supposed to be free. The plan listed this as a known risk
+with a CPU fallback as the contingency; it has simply come to pass.
+
+Nothing about the estimator changes. It consumes `(id, u, v, disparity)` tuples
+and does not care where corners come from, so this is contained to the front
+end. Everything validated in `tools/validate_estimator_math.py` still stands.
+
 ## Known gaps
 
 - **The camera model may be reading raw fisheye intrinsics, not rectified
