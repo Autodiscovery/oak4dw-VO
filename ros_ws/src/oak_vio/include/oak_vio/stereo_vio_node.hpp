@@ -66,6 +66,9 @@ class StereoVioNode : public DriverBaseNode {
     std::shared_ptr<dai::node::Camera> leftCamera_;
     std::shared_ptr<dai::node::Camera> rightCamera_;
     std::shared_ptr<dai::node::StereoDepth> stereo_;
+    /// Converts rectifiedLeft from RAW8 to GRAY8. The feature tracker silently
+    /// finds nothing in RAW8, so this is load-bearing, not cosmetic.
+    std::shared_ptr<dai::node::ImageManip> imageManip_;
     std::shared_ptr<dai::node::FeatureTracker> featureTracker_;
     std::shared_ptr<dai::node::Sync> sync_;
     std::shared_ptr<dai::MessageQueue> outputQueue_;

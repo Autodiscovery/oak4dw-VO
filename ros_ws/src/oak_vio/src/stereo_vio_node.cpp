@@ -207,14 +207,28 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     // resources and omitting it is the other candidate for producing no corners.
     featureTracker_->setHardwareResources(2, 2);
 
-    stereo_->rectifiedLeft.link(featureTracker_->inputImage);
+    // RAW8 -> GRAY8 conversion, and the reason the reference example puts an
+    // ImageManip here rather than linking the tracker straight to the stereo
+    // node.
+    //
+    // StereoDepth::rectifiedLeft emits ImgFrame::Type::RAW8 (enum 18, one byte
+    // per pixel). The feature tracker wants GRAY8. Both are 8 bits per pixel
+    // and identical in memory, so nothing errors -- the tracker accepts the
+    // frame, runs, and reports zero corners. That is a genuinely nasty failure
+    // mode: the pipeline looks completely healthy from the outside, and it cost
+    // several bring-up iterations to pin down.
+    imageManip_ = pipeline->create<dai::node::ImageManip>();
+    imageManip_->initialConfig->setFrameType(dai::ImgFrame::Type::GRAY8);
+    imageManip_->setMaxOutputFrameSize(width_ * height_);
+    stereo_->rectifiedLeft.link(imageManip_->inputImage);
+    imageManip_->out.link(featureTracker_->inputImage);
 
     // Bring-up aid: lets the failure diagnostic report the pixel format the
-    // tracker is actually being fed. The reference example inserts an
-    // ImageManip to guarantee GRAY8, so a format the tracker will not accept is
-    // a live possibility. Local memory, not XLink -- the app runs on the device
-    // -- so this costs a memcpy, not bandwidth. Remove once bring-up is done.
-    rectifiedLeftDebugQueue_ = stereo_->rectifiedLeft.createOutputQueue(1, false);
+    // tracker is actually being fed. Now taps the manip output, which is what
+    // the tracker really sees. Local memory, not XLink -- the app runs on the
+    // device -- so this costs a memcpy, not bandwidth. Remove once bring-up is
+    // done.
+    rectifiedLeftDebugQueue_ = imageManip_->out.createOutputQueue(1, false);
 
     // ---- Sync ------------------------------------------------------------
     // Pairs disparity with the feature list by timestamp. Without this the
@@ -437,13 +451,14 @@ void StereoVioNode::onFrame(const std::shared_ptr<dai::MessageGroup>& group) {
                 RCLCPP_WARN_THROTTLE(getLogger(),
                                      *getROSNode()->get_clock(),
                                      3000,
-                                     "  tracker input (rectifiedLeft): %ux%u type=%d bytes=%zu "
-                                     "(GRAY8 would be %zu bytes at this size)",
+                                     "  tracker input (after ImageManip): %ux%u type=%d bytes=%zu "
+                                     "-- GRAY8 is type=%d; if it is not, the RAW8->GRAY8 conversion "
+                                     "did not take and the tracker will find nothing",
                                      rectified->getWidth(),
                                      rectified->getHeight(),
                                      static_cast<int>(rectified->getType()),
                                      rectified->getData().size(),
-                                     static_cast<std::size_t>(rectified->getWidth()) * rectified->getHeight());
+                                     static_cast<int>(dai::ImgFrame::Type::GRAY8));
             } else {
                 RCLCPP_WARN_THROTTLE(getLogger(),
                                      *getROSNode()->get_clock(),
