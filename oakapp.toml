@@ -35,11 +35,6 @@ prepare_build_container = [
 ]
 
 build_steps = [
-    # Diagnostic: print where the driver's headers actually landed before
-    # attempting the build. The `_v3` rename on Humble/Jazzy can move them, and
-    # a missing-header error alone does not say where to look. Never fails the
-    # build; delete this step once the layout is confirmed.
-    "echo '=== depthai include dirs ===' && ls -d /opt/ros/jazzy/include/*depthai* 2>/dev/null; echo '=== base_node.hpp / base_pipeline.hpp ===' && find /opt/ros/jazzy/include -name 'base_node.hpp' -o -name 'base_pipeline.hpp' 2>/dev/null; echo '=== installed depthai packages ===' && ls /opt/ros/jazzy/share 2>/dev/null | grep -i depthai; echo '=== end diagnostic ==='; true",
     "cd /app/ros_ws && . /opt/ros/jazzy/setup.sh && colcon build --merge-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF",
 ]
 

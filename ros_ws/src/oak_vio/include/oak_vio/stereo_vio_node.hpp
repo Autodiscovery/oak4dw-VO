@@ -44,11 +44,15 @@ class StereoVioNode : public DriverBaseNode {
 
    private:
     void declareParams();
+
+    // Neither of the next two can be const: BaseNode::getROSNode() and
+    // BaseNode::getLogger() are non-const accessors, so calling them from a
+    // const member discards qualifiers. Logically both are read-only.
     /// Re-read every `vio.*` parameter into params_. Safe to call at runtime.
-    VioParams readParams() const;
+    VioParams readParams();
 
     /// Pull the rectified intrinsics and baseline off the device.
-    RectifiedCamera readCameraModel(const std::shared_ptr<dai::Device>& device) const;
+    RectifiedCamera readCameraModel(const std::shared_ptr<dai::Device>& device);
 
     /// Callback on the synced (disparity, features) message group.
     void onFrame(const std::shared_ptr<dai::MessageGroup>& group);

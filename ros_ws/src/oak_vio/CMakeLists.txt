@@ -15,6 +15,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+  # depthai's headers instantiate nlohmann::json over std::pair<float, float>,
+  # which trips GCC's aarch64 ABI-change note. It is only a note, it comes from
+  # a dependency, and each instance drags a ~40-line template backtrace into the
+  # build log -- enough to bury the actual errors.
+  add_compile_options(-Wno-psabi)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(eigen3_cmake_module REQUIRED)
 find_package(Eigen3 REQUIRED)

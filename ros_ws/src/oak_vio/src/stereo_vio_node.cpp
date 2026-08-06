@@ -128,7 +128,7 @@ void StereoVioNode::declareParams() {
     params_ = readParams();
 }
 
-VioParams StereoVioNode::readParams() const {
+VioParams StereoVioNode::readParams() {
     auto node = getROSNode();
     VioParams p;
     p.minDisparityPx = static_cast<float>(node->get_parameter("vio.i_min_disparity_px").as_double());
@@ -205,7 +205,7 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     outputQueue_ = sync_->out.createOutputQueue(4, false);
 }
 
-RectifiedCamera StereoVioNode::readCameraModel(const std::shared_ptr<dai::Device>& device) const {
+RectifiedCamera StereoVioNode::readCameraModel(const std::shared_ptr<dai::Device>& device) {
     auto calibration = device->readCalibration();
 
     // Intrinsics of the rectified left image. StereoDepth rectifies the left

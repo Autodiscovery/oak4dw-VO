@@ -2,18 +2,20 @@
 //
 // The driver package is named `depthai_ros_driver` on Kilted and newer, and
 // `depthai_ros_driver_v3` on Humble and Jazzy. Depending on how the renamed
-// package was built, its headers may land under any of:
+// package was built, its headers may land under either:
 //
-//     include/depthai_ros_driver/...                  (classic flat layout)
-//     include/depthai_ros_driver_v3/...               (renamed include dir)
-//     include/depthai_ros_driver_v3/depthai_ros_driver/...
-//                                                     (modern per-package
-//                                                      nesting, DESTINATION
-//                                                      include/${PROJECT_NAME})
+//     include/depthai_ros_driver/...      (classic flat layout)
+//     include/depthai_ros_driver_v3/...   (renamed include dir)
 //
-// All three put a different string in the #include line, so this dispatches on
+// Each puts a different string in the #include line, so this dispatches on
 // __has_include rather than making the build depend on which distro packaged
 // it. Include this instead of the driver headers directly.
+//
+// Confirmed on Luxonis OS with ros-jazzy-depthai-ros-v3: the headers are at
+//     /opt/ros/jazzy/include/depthai_ros_driver_v3/dai_nodes/base_node.hpp
+// while the C++ namespace stays `depthai_ros_driver` -- which is why the
+// namespace alias below is not needed, and why plugins.xml and
+// PLUGINLIB_EXPORT_CLASS keep the unsuffixed name.
 #pragma once
 
 #if __has_include(<depthai_ros_driver/dai_nodes/base_node.hpp>)
