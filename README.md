@@ -511,12 +511,23 @@ Millimetre-scale drift while still is the result that matters: it says the
 disparity handling carries no systematic bias, which is what the whole
 depth-uncertainty weighting exercise was for.
 
-Two caveats on those numbers. The inlier ratio of 1.00 means RANSAC is not being
-exercised — stationary, everything is consistent, and the forward-backward check
-already removes bad tracks upstream. A moving test is far more informative. And
-`median parallax 0.0 px` is expected when still, which is why keyframes were
-promoted only by the age limit (7 in 200 frames, matching
-`i_keyframe_max_age_frames: 30`).
+And moving, over 20 s:
+
+| | |
+|---|---|
+| Tracking state | `TRACKING` 100% of frames |
+| Feature funnel | 172 → 160 → 151 → **148 inliers** |
+| Inlier ratio | median 0.99 |
+| Path / net displacement | 87.3 cm / 12.4 cm |
+| Keyframes | 33 promotions, ~6 frame spans, promoted on **parallax** |
+| Estimator cost | 0.28 ms median, 0.68 ms p95 |
+
+The moving run is the informative one. Stationary, the inlier ratio was a
+vacuous 1.00 — nothing moves, so nothing disagrees, and the forward-backward
+check removes bad tracks before RANSAC ever sees them. At 0.99 with real motion,
+RANSAC is genuinely rejecting outliers. Keyframes are also now promoting on
+parallax rather than only hitting the age limit, so the promotion policy tuned in
+simulation is doing its intended job on hardware.
 
 ### Frame rate is externally dictated: 10 Hz, not 30
 

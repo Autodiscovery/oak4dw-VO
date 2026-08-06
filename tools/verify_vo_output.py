@@ -87,7 +87,14 @@ def main() -> int:
                "    source install/setup.bash\n")
     parser.add_argument("--namespace", default="/oak", help="Driver node namespace (default: /oak)")
     parser.add_argument("--duration", type=float, default=20.0, help="Collection window, seconds")
-    parser.add_argument("--expected-fps", type=float, default=30.0, help="Should match vio.i_fps")
+    # 10, not 30. This device is in external FSYNC slave mode, so its rate is set
+    # by an external sync source and vio.i_fps has no effect -- see the frame-rate
+    # section of the README. Defaulting to the configured-but-unreachable 30 made
+    # every run report a failure for a known, documented, software-unfixable
+    # condition, which is the fastest way to teach someone to ignore failures.
+    parser.add_argument("--expected-fps", type=float, default=10.0,
+                        help="Rate to expect. Match this to the camera's ACTUAL rate (see the app's "
+                             "periodic log), not to vio.i_fps, which the sensor may ignore.")
     parser.add_argument("--stationary", action="store_true",
                         help="Camera is not moving: assert drift stays near zero")
     parser.add_argument("--max-static-drift", type=float, default=0.05,

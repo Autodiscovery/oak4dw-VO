@@ -299,18 +299,23 @@ def cmd_noise(args) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--device", default=None, help="Device IP. Omit to auto-discover.")
-    parser.add_argument("--fps", type=float, default=20.0)
-    parser.add_argument("--frames", type=int, default=30)
-    parser.add_argument("--settle", type=float, default=3.0, help="Seconds to let 3A settle.")
-    parser.add_argument("--alpha", type=float, nargs="*", default=None,
+    # Options live on the SUBPARSERS, not the top-level parser, so they can be
+    # given after the subcommand -- `rectify --device <ip>` -- which is both the
+    # natural order and what this module's docstring shows. With them on the top
+    # level, argparse demands `--device <ip> rectify` and rejects anything else.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--device", default=None, help="Device IP. Omit to auto-discover.")
+    common.add_argument("--fps", type=float, default=20.0)
+    common.add_argument("--frames", type=int, default=30)
+    common.add_argument("--settle", type=float, default=3.0, help="Seconds to let 3A settle.")
+    common.add_argument("--alpha", type=float, nargs="*", default=None,
                         help="Alpha scaling values to sweep, e.g. --alpha 0 0.25 0.5 0.75 1")
 
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("calib", help="Dump calibration and infer the projection model.")
-    sub.add_parser("rectify", help="Sweep alpha scaling; measure FoV and epipolar error.")
-    sub.add_parser("noise", help="Measure disparity noise against a flat wall.")
+    sub.add_parser("calib", parents=[common], help="Dump calibration and infer the projection model.")
+    sub.add_parser("rectify", parents=[common], help="Sweep alpha scaling; measure FoV and epipolar error.")
+    sub.add_parser("noise", parents=[common], help="Measure disparity noise against a flat wall.")
 
     args = parser.parse_args()
     return {"calib": cmd_calib, "rectify": cmd_rectify, "noise": cmd_noise}[args.command](args)
