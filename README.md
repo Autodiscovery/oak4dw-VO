@@ -518,12 +518,33 @@ already removes bad tracks upstream. A moving test is far more informative. And
 promoted only by the age limit (7 in 200 frames, matching
 `i_keyframe_max_age_frames: 30`).
 
-**Still open:** the sensor delivers 10 Hz against 30 requested, which halves the
-VO rate. Not auto-exposure (8.3 ms) and not a throughput limit — the rate is
-identical at 1280×800 and 640×400. Latest theory, now implemented: FPS has to be
-passed to `Camera::build()`, whose third parameter is the sensor frame rate,
-rather than to `requestOutput()`, which is already known to ignore its
-pixel-format argument on this device.
+### Frame rate is externally dictated: 10 Hz, not 30
+
+The VO runs at 10 Hz because **the camera does**, and that cannot be changed from
+software on this device. Setting the sensor FPS aborts the pipeline:
+
+```
+RPC 'startPipeline' failed: Cannot override fps while using external FSYNC slave mode
+```
+
+The device is in external FSYNC slave mode — its frame rate comes from an
+external sync source. This holds whether or not the sensor resolution is given
+explicitly, so `vio.i_set_sensor_fps` defaults to **false** and `vio.i_fps` is
+*not* the rate you get. The app logs the actual camera rate every five seconds so
+the discrepancy stays visible rather than silent.
+
+Worth recording how long this took to identify, because every cheaper explanation
+looked plausible first: not auto-exposure (8.3 ms, far under the 33 ms that
+30 FPS allows), not a throughput limit (identical at 1280×800 and 640×400 — a
+rate that does not move with resolution is not a bottleneck), and not the Sync
+window (every pipeline stage measured at 10 Hz, so the camera was the source).
+The `FsyncController` ioctl error in an early probe log was pointing at it all
+along and was not followed up.
+
+To actually raise the rate, the FSYNC configuration has to change on the device —
+check whether anything is driving the M8 auxiliary connector. At 10 Hz the VO
+works but has less inter-frame overlap to work with, which matters most under
+fast rotation.
 
 Next up: the closed-loop drift test, and Phase 0 `rectify` to settle absolute
 scale.

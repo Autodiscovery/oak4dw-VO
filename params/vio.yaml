@@ -43,11 +43,19 @@
       i_sensor_width: 1280
       i_sensor_height: 800
 
-      # Set false if the device is in EXTERNAL FSYNC slave mode -- rate driven by
-      # a signal on the M8 connector rather than by its own sensor pair. In that
-      # case the rate cannot be set from software and trying aborts the pipeline
-      # with "Cannot override fps while using external FSYNC slave mode".
-      i_set_sensor_fps: true
+      # FALSE for this device, confirmed by experiment.
+      #
+      # This OAK 4 D W is in external FSYNC slave mode: its frame rate comes from
+      # an external sync source, not from software. Setting the sensor FPS aborts
+      # the pipeline outright with
+      #     Cannot override fps while using external FSYNC slave mode
+      # and it does so whether or not the sensor resolution is given explicitly.
+      #
+      # The practical consequence is that i_fps above is NOT the rate you get. The
+      # observed rate is 10 Hz, and the app logs the actual camera rate every five
+      # seconds so the difference stays visible. Raising the VO rate means changing
+      # the FSYNC configuration on the device, not this file.
+      i_set_sensor_fps: false
 
       # MUST match StereoDepth's subpixel configuration. 5 bits = 1/32 px.
       # A mismatch scales every depth by a power of two, which produces a

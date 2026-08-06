@@ -92,11 +92,12 @@ void StereoVioNode::declareParams() {
     sensorWidth_ = declareOnce<int>(node, "vio.i_sensor_width", 1280);
     sensorHeight_ = declareOnce<int>(node, "vio.i_sensor_height", 800);
 
-    // Whether to set the sensor frame rate at all. Set false if the device is in
-    // *external* FSYNC slave mode, where the rate comes from a signal on the M8
-    // connector and cannot be set from software -- attempting it aborts the
-    // pipeline with "Cannot override fps while using external FSYNC slave mode".
-    declareOnce<bool>(node, "vio.i_set_sensor_fps", true);
+    // Defaults FALSE because the OAK 4 D W tested here is in external FSYNC slave
+    // mode: the rate comes from an external sync source and cannot be set from
+    // software. Attempting it aborts the pipeline with "Cannot override fps while
+    // using external FSYNC slave mode", with or without an explicit sensor
+    // resolution. Set true on a device that owns its own timing.
+    declareOnce<bool>(node, "vio.i_set_sensor_fps", false);
 
     // StereoDepth subpixel setting. This MUST match what DisparityMapSource
     // divides by, or every depth is scaled by a power of two and the
@@ -317,7 +318,20 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     stereo_->disparity.link(sync_->inputs[disparityKey_]);
     outputQueue_ = sync_->out.createOutputQueue(4, false);
 
-    RCLCPP_INFO(getLogger(), "VO pipeline: %dx%d @ %.1f FPS, sync window %d ms, CPU feature tracking", width_, height_, fps_, syncWindowMs);
+    if(setSensorFps) {
+        RCLCPP_INFO(getLogger(), "VO pipeline: %dx%d from %dx%d sensor @ %.1f FPS requested, sync window %d ms, CPU feature tracking", width_, height_, sensorWidth_, sensorHeight_, fps_, syncWindowMs);
+    } else {
+        RCLCPP_WARN(getLogger(),
+                    "VO pipeline: %dx%d from %dx%d sensor, sync window %d ms, CPU feature tracking. Sensor FPS is "
+                    "NOT being set (vio.i_set_sensor_fps is false), so vio.i_fps=%.1f is not the rate you will get -- "
+                    "an external FSYNC source dictates it. Watch the 'camera N Hz' figure below for the real rate.",
+                    width_,
+                    height_,
+                    sensorWidth_,
+                    sensorHeight_,
+                    syncWindowMs,
+                    fps_);
+    }
 
     // Camera rate and exposure. Retained because the sensor delivering 10 Hz
     // against 30 requested is still unexplained, and is independent of the
