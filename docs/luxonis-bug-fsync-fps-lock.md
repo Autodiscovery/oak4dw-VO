@@ -1,10 +1,27 @@
 # Bug report: OAK 4 D W locked to 10 FPS by external FSYNC slave mode
 
-Ready to file at <https://github.com/luxonis/depthai-core/issues>.
+**One check outstanding before filing.** Two of the three ways to ask for a frame
+rate are confirmed blocked — `build(sensorFps=...)` raises and
+`requestOutput(fps=...)` is silently ignored. The third, declaring the rate on an
+`ImgFrameCapability` and passing that to `requestOutput`, is a different code path
+and has not been tested:
+
+```python
+cap = dai.ImgFrameCapability()
+cap.size.fixed((1280, 800))
+cap.fps.fixed(30)
+stream = cam.requestOutput(cap)
+```
+
+`tools/probe_frame_rate.py` now covers it. If that route works, the rate is
+settable after all and this report should be rewritten as an API-consistency
+issue — two routes refusing what a third permits — rather than a hard cap.
 
 Verified as device-level and not caused by our pipeline: a **single camera with no
 stereo node at all** refuses the frame rate identically. See the isolation table
 below.
+
+Filing target: <https://github.com/luxonis/depthai-core/issues>
 
 ## Summary
 

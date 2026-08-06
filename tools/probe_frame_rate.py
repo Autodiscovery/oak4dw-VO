@@ -61,8 +61,16 @@ def connect(ip: str | None, attempts: int = 4):
     raise RuntimeError("unreachable")
 
 
-def run_variant(ip, *, label, cameras, use_stereo, set_fps, fps, seconds):
-    """Returns (rate_hz, error_string)."""
+def run_variant(ip, *, label, cameras, use_stereo, set_fps, fps, seconds, capability=False):
+    """Returns (rate_hz, error_string).
+
+    `capability` selects a different way of asking for the frame rate: declare it
+    on an ImgFrameCapability and pass that to requestOutput, rather than
+    overriding it via build(sensorFps=...) or requestOutput(fps=...). Both of
+    those are refused in FSYNC slave mode, but a capability is a statement of what
+    the stream should be rather than an override of sensor timing, so it may go
+    through a different path.
+    """
     device = connect(ip)
     frames = 0
     error = ""
@@ -76,7 +84,17 @@ def run_variant(ip, *, label, cameras, use_stereo, set_fps, fps, seconds):
                 cam = pipeline.create(dai.node.Camera).build(socket, sensorResolution=SENSOR, sensorFps=sensor_fps)
                 built.append(cam)
 
-            outputs = [c.requestOutput(SENSOR, type=dai.ImgFrame.Type.GRAY8, fps=fps) for c in built]
+            if capability:
+                cap = dai.ImgFrameCapability()
+                cap.size.fixed(SENSOR)
+                cap.fps.fixed(fps)
+                try:
+                    cap.type = dai.ImgFrame.Type.GRAY8
+                except Exception:  # noqa: BLE001 - older bindings may not expose it
+                    pass
+                outputs = [c.requestOutput(cap) for c in built]
+            else:
+                outputs = [c.requestOutput(SENSOR, type=dai.ImgFrame.Type.GRAY8, fps=fps) for c in built]
 
             # Every requested output must be linked or queued -- depthai rejects a
             # dangling one with "Always call output->createOutputQueue() or
@@ -143,22 +161,53 @@ def main() -> int:
     print("  " + "-" * 78)
 
     variants = [
-        ("one camera, no fps set", dict(cameras=[LEFT], use_stereo=False, set_fps=False)),
-        ("one camera, sensorFps set", dict(cameras=[LEFT], use_stereo=False, set_fps=True)),
-        ("two cameras, no stereo, fps set", dict(cameras=[LEFT, RIGHT], use_stereo=False, set_fps=True)),
-        ("stereo pair, no fps set", dict(cameras=[LEFT, RIGHT], use_stereo=True, set_fps=False)),
-        ("stereo pair, sensorFps set", dict(cameras=[LEFT, RIGHT], use_stereo=True, set_fps=True)),
+        ("one camera, no fps set", dict(cameras=[LEFT], use_stereo=False, set_fps=False), args.fps),
+        ("one camera, sensorFps set", dict(cameras=[LEFT], use_stereo=False, set_fps=True), args.fps),
+        ("two cameras, no stereo, fps set", dict(cameras=[LEFT, RIGHT], use_stereo=False, set_fps=True), args.fps),
+        ("stereo pair, no fps set", dict(cameras=[LEFT, RIGHT], use_stereo=True, set_fps=False), args.fps),
+        ("stereo pair, sensorFps set", dict(cameras=[LEFT, RIGHT], use_stereo=True, set_fps=True), args.fps),
+        # Capability route: declare the rate on an ImgFrameCapability instead of
+        # overriding sensor timing. Different code path, so it may not hit the
+        # FSYNC check that refuses the other two.
+        (f"one camera, Capability fps.fixed({args.fps:.0f})",
+         dict(cameras=[LEFT], use_stereo=False, set_fps=False, capability=True), args.fps),
+        (f"stereo pair, Capability fps.fixed({args.fps:.0f})",
+         dict(cameras=[LEFT, RIGHT], use_stereo=True, set_fps=False, capability=True), args.fps),
+        ("stereo pair, Capability fps.fixed(60)",
+         dict(cameras=[LEFT, RIGHT], use_stereo=True, set_fps=False, capability=True), 60.0),
     ]
 
     results = {}
-    for label, kwargs in variants:
-        results[label] = run_variant(args.device, label=label, fps=args.fps, seconds=args.seconds, **kwargs)
+    for label, kwargs, variant_fps in variants:
+        results[label] = run_variant(args.device, label=label, fps=variant_fps, seconds=args.seconds, **kwargs)
 
     single_ok = not results["one camera, sensorFps set"][1]
     pair_ok = not results["stereo pair, sensorFps set"][1]
     single_rate = results["one camera, no fps set"][0]
 
-    print("\nConclusion:")
+    # The capability route is the one that would actually unblock the app, so
+    # report on it first regardless of what the override rows say.
+    cap_rows = {k: v for k, v in results.items() if "Capability" in k}
+    cap_worked = [k for k, (rate, err) in cap_rows.items() if not err and rate == rate and rate > 15.0]
+    cap_started = [k for k, (_, err) in cap_rows.items() if not err]
+
+    print("\nCapability route:")
+    if cap_worked:
+        best = max(cap_worked, key=lambda k: cap_rows[k][0])
+        print(f"  WORKS. {best} reached {cap_rows[best][0]:.1f} Hz.")
+        print("  Declaring the rate on an ImgFrameCapability gets past the FSYNC restriction that")
+        print("  refuses build(sensorFps=...) and requestOutput(fps=...). Switch the app to this")
+        print("  and the 10 Hz cap is lifted -- and the FSYNC bug report needs rewriting, because")
+        print("  the rate is settable after all, just not by the two obvious routes.")
+    elif cap_started:
+        rates = ", ".join(f"{cap_rows[k][0]:.1f} Hz" for k in cap_started)
+        print(f"  Accepted but did not raise the rate ({rates}).")
+        print("  No exception, no effect -- the same silent no-op as requestOutput(fps=...).")
+        print("  The rate really is externally fixed.")
+    else:
+        print("  Rejected as well, so all three routes to the frame rate are blocked.")
+
+    print("\nConclusion on where the mode comes from:")
     if single_ok and not pair_ok:
         print("  A single camera accepts the frame rate; the stereo pair does not. So the sync")
         print("  mode is selected when the pair is set up, not something the device sits in")
