@@ -43,25 +43,32 @@
       i_sensor_width: 1280
       i_sensor_height: 800
 
-      # FALSE, and correct: this camera is an FSYNC SLAVE in a multi-camera rig,
-      # wired through the M8 connector. Its frame rate is set by the FSYNC master,
-      # and a slave must not try to override it -- attempting to aborts the
-      # pipeline with "Cannot override fps while using external FSYNC slave mode".
+      # IS A CABLE PLUGGED INTO THIS CAMERA'S M8 "IN" PORT?
       #
-      # So i_fps above is NOT the rate you get; the master decides.
+      # A physical fact about the rig, not a preference. There is no API to query
+      # it, so it has to be told to us, and it decides who owns the frame rate:
       #
-      # Master versus slave is decided by CABLING, not by software. The device with
-      # nothing plugged into its M8 "IN" port outputs its internal FSYNC signal and
-      # becomes the master; anything with a cable in "IN" is a slave. OAK 4 D can
-      # be either (older OAK PoE models can only ever be slaves). Up to 3 devices
-      # per chain before cumulative resistance degrades the signal.
+      #   true  -- cable IN. This camera is an FSYNC SLAVE. The master sets the
+      #            rate, i_fps above has NO EFFECT, and the sensor rate must not be
+      #            touched (trying aborts the pipeline with "Cannot override fps
+      #            while using external FSYNC slave mode").
       #
-      # Two ways to get 30 Hz:
-      #   1. Leave this false and set the existing master to 30 Hz.
-      #   2. Make THIS camera the master -- unplug its "IN", drive the others from
-      #      its "OUT" -- then set this true and i_fps to 30. It then defines the
-      #      rate for the whole rig.
-      i_set_sensor_fps: false
+      #   false -- nothing in IN. This camera GENERATES FSYNC, owns its timing, and
+      #            i_fps is applied to the sensor. It also then defines the rate for
+      #            any camera slaved to its OUT port.
+      #
+      # Getting it wrong is not symmetric, which is why the default is true:
+      #   slave told it is master  -> pipeline aborts at start, loudly and obviously
+      #   master told it is slave  -> runs, but i_fps is silently ignored
+      #
+      # To run this camera at 30 (or 60) Hz: unplug its "IN", drive the other
+      # cameras from its "OUT", set this false, and set i_fps above. The startup log
+      # states which mode it is in, and the periodic log compares the requested rate
+      # against the delivered one and warns if they disagree.
+      #
+      # Older OAK PoE models can only ever be slaves; OAK 4 D can be either. Up to
+      # 3 devices per chain before cumulative resistance degrades the signal.
+      i_fsync_connected: true
 
       # MUST match StereoDepth's subpixel configuration. 5 bits = 1/32 px.
       # A mismatch scales every depth by a power of two, which produces a

@@ -110,6 +110,16 @@ class StereoVioNode : public DriverBaseNode {
     bool rosConvention_{true};
     float alphaScaling_{-1.0F};
 
+    /// Is a cable plugged into this camera's M8 "IN" port?
+    ///
+    /// This is a physical fact about the rig, not a software preference, and it
+    /// decides who owns the frame rate. Cable in IN means FSYNC slave: the master
+    /// dictates the rate and we must not try to set it. Nothing in IN means this
+    /// camera generates FSYNC, owns its timing, and vio.i_fps applies.
+    ///
+    /// There is no API to query this, so it has to be told to us.
+    bool fsyncConnected_{true};
+
     // --- Timing / health ---------------------------------------------------
     /// Wall-clock cost of the CPU tracker, which is the one part of this
     /// pipeline that is no longer free. Reported so the LENS budget stays honest.

@@ -92,12 +92,12 @@ void StereoVioNode::declareParams() {
     sensorWidth_ = declareOnce<int>(node, "vio.i_sensor_width", 1280);
     sensorHeight_ = declareOnce<int>(node, "vio.i_sensor_height", 800);
 
-    // Defaults FALSE because the OAK 4 D W tested here is in external FSYNC slave
-    // mode: the rate comes from an external sync source and cannot be set from
-    // software. Attempting it aborts the pipeline with "Cannot override fps while
-    // using external FSYNC slave mode", with or without an explicit sensor
-    // resolution. Set true on a device that owns its own timing.
-    declareOnce<bool>(node, "vio.i_set_sensor_fps", false);
+    // Is a cable plugged into this camera's M8 "IN" port? A physical fact about
+    // the rig, which decides who owns the frame rate. Defaults true (slave), the
+    // safe assumption: a slave that does not try to set the rate simply runs at
+    // the master's rate, whereas a master wrongly told it is slaved silently
+    // ignores i_fps, and a slave wrongly told it is master aborts the pipeline.
+    fsyncConnected_ = declareOnce<bool>(node, "vio.i_fsync_connected", true);
 
     // StereoDepth subpixel setting. This MUST match what DisparityMapSource
     // divides by, or every depth is scaled by a power of two and the
@@ -236,10 +236,12 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     // If this still throws, the device is in *external* FSYNC slave mode -- driven
     // by a signal on the M8 connector rather than by its own right sensor -- and
     // the rate cannot be set from software at all. Set
-    // vio.i_set_sensor_fps: false to get back to a running app at whatever rate
+    // vio.i_fsync_connected: true to get back to a running app at whatever rate
     // the external source dictates.
-    const bool setSensorFps = getROSNode()->get_parameter("vio.i_set_sensor_fps").as_bool();
-    const std::optional<float> sensorFps = setSensorFps ? std::optional<float>(static_cast<float>(fps_)) : std::nullopt;
+    // FSYNC cable in the IN port means this camera is a slave and the master owns
+    // the rate; nothing in IN means it generates FSYNC and owns its own timing, so
+    // vio.i_fps applies and gets passed to the sensor.
+    const std::optional<float> sensorFps = fsyncConnected_ ? std::nullopt : std::optional<float>(static_cast<float>(fps_));
     const auto sensorResolution = std::make_pair(sensorWidth_, sensorHeight_);
 
     leftCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_B, sensorResolution, sensorFps);
@@ -318,26 +320,38 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     stereo_->disparity.link(sync_->inputs[disparityKey_]);
     outputQueue_ = sync_->out.createOutputQueue(4, false);
 
-    if(setSensorFps) {
-        RCLCPP_INFO(getLogger(), "VO pipeline: %dx%d from %dx%d sensor @ %.1f FPS requested, sync window %d ms, CPU feature tracking", width_, height_, sensorWidth_, sensorHeight_, fps_, syncWindowMs);
-        // Pre-warn, because the failure lands inside the driver's pipeline start
-        // where we cannot catch it and the message alone is easy to misread.
-        RCLCPP_INFO(getLogger(),
-                    "Setting the sensor rate, which requires this camera to own its timing. If it is "
-                    "an FSYNC slave -- anything plugged into its M8 IN port -- pipeline start will abort "
-                    "with \"Cannot override fps while using external FSYNC slave mode\". In that case set "
-                    "vio.i_set_sensor_fps to false and let the FSYNC master set the rate.");
-    } else {
+    RCLCPP_INFO(getLogger(),
+                "VO pipeline: %dx%d from %dx%d sensor, sync window %d ms, CPU feature tracking",
+                width_,
+                height_,
+                sensorWidth_,
+                sensorHeight_,
+                syncWindowMs);
+
+    if(fsyncConnected_) {
         RCLCPP_WARN(getLogger(),
-                    "VO pipeline: %dx%d from %dx%d sensor, sync window %d ms, CPU feature tracking. Sensor FPS is "
-                    "NOT being set (vio.i_set_sensor_fps is false), so vio.i_fps=%.1f is not the rate you will get -- "
-                    "an external FSYNC source dictates it. Watch the 'camera N Hz' figure below for the real rate.",
-                    width_,
-                    height_,
-                    sensorWidth_,
-                    sensorHeight_,
-                    syncWindowMs,
+                    "FSYNC: cable IN (vio.i_fsync_connected=true) -- this camera is an FSYNC SLAVE, so the "
+                    "master sets the frame rate and vio.i_fps=%.1f has NO EFFECT. To run faster, raise the "
+                    "master's rate, or unplug this camera's M8 IN port, drive the others from its OUT, and set "
+                    "vio.i_fsync_connected=false. Watch 'camera N Hz' below for the actual rate.",
                     fps_);
+    } else {
+        RCLCPP_INFO(getLogger(),
+                    "FSYNC: cable OUT (vio.i_fsync_connected=false) -- this camera generates FSYNC and owns its "
+                    "timing, so the sensor is being set to %.1f FPS and it defines the rate for any camera "
+                    "slaved to it.",
+                    fps_);
+        // The OV9282 pair tops out at 60 FPS at full resolution. Asking for more
+        // will fail at pipeline start, which is a confusing place to find out.
+        if(fps_ > 60.0) {
+            RCLCPP_WARN(getLogger(), "vio.i_fps=%.1f exceeds the 60 FPS the OV9282 pair supports at this resolution; expect pipeline start to fail.", fps_);
+        }
+        // If the cable is actually still plugged in, the failure lands inside the
+        // driver's pipeline start where we cannot catch it, so say now what it will
+        // look like.
+        RCLCPP_INFO(getLogger(),
+                    "If pipeline start now aborts with \"Cannot override fps while using external FSYNC slave "
+                    "mode\", the cable is still in this camera's IN port -- set vio.i_fsync_connected=true.");
     }
 
     // Camera rate and exposure. Retained because the sensor delivering 10 Hz
@@ -587,11 +601,30 @@ void StereoVioNode::onFrame(const std::shared_ptr<dai::MessageGroup>& group) {
     } else if(now - lastRateLog_ >= std::chrono::seconds(5)) {
         const double elapsed = std::chrono::duration<double>(now - lastRateLog_).count();
         const std::uint64_t cameraFrames = cameraFrames_.exchange(0);
+        const double cameraHz = static_cast<double>(cameraFrames) / elapsed;
+
+        // When we claim to own the timing, check we actually got what we asked
+        // for. Setting a rate and never verifying it is how the original 10 Hz
+        // went unnoticed for so long -- requestOutput accepted 30 and delivered
+        // 10 without a word.
+        if(!fsyncConnected_ && cameraHz > 1.0 && std::abs(cameraHz - fps_) > 0.2 * fps_) {
+            RCLCPP_WARN_THROTTLE(getLogger(),
+                                 *getROSNode()->get_clock(),
+                                 10000,
+                                 "Requested %.1f FPS but the camera is delivering %.1f Hz. Either the sensor cannot "
+                                 "sustain this rate at %dx%d, or vio.i_fsync_connected is wrong and something is "
+                                 "driving this camera's FSYNC after all.",
+                                 fps_,
+                                 cameraHz,
+                                 sensorWidth_,
+                                 sensorHeight_);
+        }
+
         RCLCPP_INFO(getLogger(),
                     "VO: %.1f Hz (camera %.1f, requested %.1f) | corners %zu tracked, %zu with disparity, %d inliers "
                     "| tracker %.1f ms, estimator %.2f ms | exposure %.1f ms ISO %d",
                     static_cast<double>(framesSinceLog_) / elapsed,
-                    static_cast<double>(cameraFrames) / elapsed,
+                    cameraHz,
                     fps_,
                     tracked,
                     observations.size(),

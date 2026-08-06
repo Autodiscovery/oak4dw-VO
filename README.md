@@ -534,8 +534,8 @@ simulation is doing its intended job on hardware.
 **The camera is an FSYNC slave in a multi-camera rig, wired through the M8
 connector.** That is the whole explanation for the observed ~10 Hz: it is the rate
 the master was driving. Drive FSYNC at 30 Hz and the VO runs at 30 Hz, with no
-change to this app — `vio.i_set_sensor_fps` is already `false`, which is the
-correct setting for a slave, and `vio.i_fps` is inoperative by design.
+change to this app — `vio.i_fsync_connected` defaults to `true`, which is the
+correct setting for a slave, and `vio.i_fps` is inoperative in that mode by design.
 
 Everything below documents how that was diagnosed, and the API friction that made
 it slower than it should have been. Note that the earlier framing here and in the
@@ -560,7 +560,7 @@ So there are two routes to 30 Hz:
 1. **Leave this camera a slave** and set the existing master to 30 Hz. Nothing
    changes here.
 2. **Make this camera the master** — unplug its `IN`, drive the others from its
-   `OUT` — then set `vio.i_set_sensor_fps: true` and `vio.i_fps: 30`. It then
+   `OUT` — then set `vio.i_fsync_connected: false` and `vio.i_fps: 30`. It then
    defines the rate for the whole rig, and the OV9282 pair will go to 60 if you
    want it.
 
@@ -569,7 +569,7 @@ since it puts the rate under this app's control. Route 1 is right if something
 else should govern rig timing.
 
 There is no software way to force mastership, which is also why the app cannot
-detect it: if `i_set_sensor_fps` is set true on a slaved camera, the pipeline
+detect it: if `i_fsync_connected` is set false on a still-slaved camera, the pipeline
 aborts inside the driver's start where we cannot intercept it. Startup now logs a
 warning naming that failure mode before it can happen.
 
@@ -584,7 +584,7 @@ RPC 'startPipeline' failed: Cannot override fps while using external FSYNC slave
 
 The device is in external FSYNC slave mode — its frame rate comes from an
 external sync source. This holds whether or not the sensor resolution is given
-explicitly, so `vio.i_set_sensor_fps` defaults to **false** and `vio.i_fps` is
+explicitly, so `vio.i_fsync_connected` defaults to **true** and `vio.i_fps` is
 *not* the rate you get. The app logs the actual camera rate every five seconds so
 the discrepancy stays visible rather than silent.
 
