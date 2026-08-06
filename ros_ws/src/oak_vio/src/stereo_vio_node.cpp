@@ -202,7 +202,24 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     // estimator would eventually sample disparity from a different frame than
     // the features came from, which produces a slow, baffling scale drift.
     sync_ = pipeline->create<dai::node::Sync>();
-    sync_->setSyncThreshold(std::chrono::milliseconds(static_cast<int>(500.0 / std::max(1.0, fps_))));
+
+    // Window of 1.5 frame periods, not half of one.
+    //
+    // Disparity comes off the stereo block and features off the tracker block:
+    // different engines, different latencies, so some timestamp skew is normal.
+    // A window narrower than a frame period drops any pair that skews, and
+    // Sync does it silently -- the symptom is a reduced and unstable output
+    // rate with no error anywhere. An earlier half-period window produced
+    // 29.5 Hz on one run and 10.0 Hz on the next from identical code.
+    //
+    // Too wide is not free either: it would let genuinely mismatched frames
+    // through, and sampling disparity from a different frame than the features
+    // came from causes a slow scale drift that is very hard to attribute.
+    // 1.5 periods absorbs normal jitter while still rejecting a whole frame of
+    // slip.
+    const auto syncWindowMs = static_cast<int>(1500.0 / std::max(1.0, fps_));
+    sync_->setSyncThreshold(std::chrono::milliseconds(syncWindowMs));
+    RCLCPP_INFO(getLogger(), "VO sync window: %d ms (%.1f FPS)", syncWindowMs, fps_);
     stereo_->disparity.link(sync_->inputs[disparityKey_]);
     featureTracker_->outputFeatures.link(sync_->inputs[featuresKey_]);
 

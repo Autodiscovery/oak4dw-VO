@@ -137,8 +137,14 @@ def main() -> int:
     wall = node.odom[-1][0] - node.odom[0][0]
     rate = (n - 1) / wall if wall > 0 else 0.0
     check(n > 10, "received a usable number of messages", f"{n} messages in {wall:.1f} s")
-    check(rate > 0.5 * args.expected_fps, "rate is close to the configured FPS",
+    rate_ok = rate > 0.5 * args.expected_fps
+    check(rate_ok, "rate is close to the configured FPS",
           f"{rate:.1f} Hz vs {args.expected_fps:.0f} configured")
+    if not rate_ok:
+        print("         A rate well below the configured FPS usually means the Sync node is")
+        print("         dropping pairs whose disparity and feature timestamps skew outside its")
+        print("         window. The app logs the window at startup ('VO sync window: N ms');")
+        print("         widen it by lowering vio.i_fps or rebuild with a larger multiplier.")
 
     # Gaps point at dropped frames or a stalled estimator.
     gaps = [b[0] - a[0] for a, b in zip(node.odom, node.odom[1:])]
