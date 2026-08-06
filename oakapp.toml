@@ -31,11 +31,22 @@ prepare_container = [
 prepare_build_container = [
     { type = "COPY", source = "resolv.conf", target = "/etc/resolv.conf" },
     { type = "RUN", command = "apt-get update" },
-    # libopencv-dev supplies the CPU corner detector and Lucas-Kanade tracker
-    # that replace the broken RVC4 hardware feature tracker. The runtime
-    # libraries already come in with cv_bridge via depthai-ros; only the headers
-    # are needed here, and this layer is discarded after the build.
-    { type = "RUN", command = "apt-get install -y build-essential cmake git libeigen3-dev libopencv-dev python3-colcon-common-extensions ros-jazzy-ament-cmake ros-jazzy-ament-cmake-gtest ros-jazzy-eigen3-cmake-module ros-jazzy-rosidl-default-generators" },
+    # libopencv-dev pulls dbus in via its GUI recommends, and dbus ships a dpkg
+    # statoverride referencing a `messagebus` system group that does not exist in
+    # a slim container image. dpkg then aborts the whole install with
+    # "unknown system group 'messagebus' in statoverride file". Creating the group
+    # first is enough to satisfy it.
+    { type = "RUN", command = "groupadd --system messagebus || true" },
+
+    { type = "RUN", command = "apt-get install -y build-essential cmake git libeigen3-dev python3-colcon-common-extensions ros-jazzy-ament-cmake ros-jazzy-ament-cmake-gtest ros-jazzy-eigen3-cmake-module ros-jazzy-rosidl-default-generators" },
+
+    # OpenCV headers for the CPU corner detector and Lucas-Kanade tracker that
+    # replace the broken RVC4 hardware feature tracker. --no-install-recommends
+    # matters here: with recommends this pulled 237 MB, nearly all of it GUI
+    # toolkits this app has no use for. We only need core, imgproc and video, but
+    # the split -dev packages omit the CMake config that find_package needs, so
+    # the metapackage stays -- just without its optional baggage.
+    { type = "RUN", command = "apt-get install -y --no-install-recommends libopencv-dev" },
 ]
 
 build_steps = [
