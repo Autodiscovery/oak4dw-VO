@@ -1,0 +1,20 @@
+# Keep the uploaded app payload small — everything here is either build output
+# or host-side tooling that the device never needs.
+.git/
+.gitignore
+*.oakapp
+
+# colcon build artefacts, if the workspace was ever built on the host
+ros_ws/build/
+ros_ws/install/
+ros_ws/log/
+
+# Host-side analysis tooling. tools/ runs on your workstation against the
+# device over the network, not inside the container.
+tools/
+docs/
+media/
+
+__pycache__/
+*.pyc
+*.pyo

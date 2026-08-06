@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  CycloneDDS configuration for the camera side of the link.
+
+  The container reaches the host over the OAK 4's Ethernet/PoE interface. On a
+  normal LAN multicast discovery usually works, but it is the single most
+  common failure mode for "the topics do not show up on the host", and it fails
+  silently. Listing the host as an explicit peer makes discovery work whether
+  or not multicast is being forwarded.
+
+  Set OAK_ROS_PEER to the host's IP before starting the app:
+
+      oakctl app run . --env OAK_ROS_PEER=192.168.1.50
+
+  Leaving it unset falls back to multicast only, which is fine on a
+  well-behaved LAN.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <!-- Bind to whichever interface actually has a route to the host. -->
+      <Interfaces>
+        <NetworkInterface autodetermine="true" priority="default" multicast="default" />
+      </Interfaces>
+      <AllowMulticast>default</AllowMulticast>
+      <!-- Ethernet MTU; raise only if the whole path supports jumbo frames. -->
+      <MaxMessageSize>1400B</MaxMessageSize>
+    </General>
+
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <Peers>
+        <Peer address="${OAK_ROS_PEER:-localhost}" />
+      </Peers>
+    </Discovery>
+
+    <Internal>
+      <!-- Odometry is small and frequent; latency matters more than batching. -->
+      <Watermarks>
+        <WhcHigh>256kB</WhcHigh>
+      </Watermarks>
+    </Internal>
+
+    <Tracing>
+      <Verbosity>warning</Verbosity>
+      <OutputFile>stderr</OutputFile>
+    </Tracing>
+  </Domain>
+</CycloneDDS>

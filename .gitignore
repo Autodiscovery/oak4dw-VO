@@ -1,0 +1,24 @@
+# colcon
+ros_ws/build/
+ros_ws/install/
+ros_ws/log/
+
+# oakctl build output
+*.oakapp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Phase 0 captures and logs — measurements belong in params/vio.yaml, not here
+captures/
+*.log

@@ -1,0 +1,18 @@
+<!--
+  Registers the VO pipeline with depthai_ros_driver's pipeline_gen plugin
+  system. Select it at runtime with:
+
+      pipeline_gen:
+        i_pipeline_type: oak_vio::StereoVioPipeline
+-->
+<library path="oak_vio_pipeline_plugin">
+  <class name="oak_vio::StereoVioPipeline"
+         type="oak_vio::StereoVioPipeline"
+         base_class_type="depthai_ros_driver::pipeline_gen::BasePipeline">
+    <description>
+      Stereo visual odometry pipeline for RVC4. Adds StereoDepth and
+      FeatureTracker to the driver's pipeline and publishes 6-DOF odometry
+      estimated on the device.
+    </description>
+  </class>
+</library>

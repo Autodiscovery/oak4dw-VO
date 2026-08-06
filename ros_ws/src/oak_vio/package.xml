@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>oak_vio</name>
+  <version>0.1.0</version>
+  <description>
+    On-device stereo visual odometry for the OAK 4 D W (RVC4), implemented from
+    scratch under a permissive licence. Ships as a depthai_ros_driver pipeline
+    plugin so it shares one DepthAI device with the rest of the camera pipeline.
+  </description>
+
+  <maintainer email="aron@autodiscovery.co.uk">Autodiscovery</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>eigen3_cmake_module</buildtool_depend>
+
+  <!--
+    NOTE ON PACKAGE NAMES. On Humble and Jazzy the DepthAI v3 packages carry a
+    `_v3` suffix; from Kilted onward v3 is the default and the suffix is gone.
+    These names target Jazzy. If this is ever built against Kilted, drop the
+    suffixes here and in CMakeLists.txt.
+  -->
+  <depend>depthai_v3</depend>
+  <depend>depthai_bridge_v3</depend>
+  <depend>depthai_ros_driver_v3</depend>
+  <depend>depthai_ros_msgs_v3</depend>
+
+  <depend>eigen</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>oak_vio_msgs</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_lint_auto</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <depthai_ros_driver_v3 plugin="${prefix}/plugins.xml"/>
+  </export>
+</package>

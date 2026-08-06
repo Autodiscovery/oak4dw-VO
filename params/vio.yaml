@@ -1,0 +1,112 @@
+# Parameters for the on-device stereo VO app.
+#
+# Values marked "Phase 0" are placeholders derived from the published FoV spec
+# and must be replaced with measurements from tools/phase0_calibration_check.py
+# before the numbers here mean anything.
+
+/oak:
+  ros__parameters:
+    driver:
+      i_enable_ir: false
+      i_publish_tf_from_calibration: true
+
+    pipeline_gen:
+      i_pipeline_type: oak_vio::StereoVioPipeline
+      i_nn_type: none
+
+    vio:
+      # ---- Sensor configuration ----------------------------------------
+      # Full 1280x800. CPU cost is proportional to feature count, not
+      # resolution, and the HW blocks handle 800p at 60 FPS, so there is no
+      # reason to bin. Halving resolution would halve the focal length and
+      # therefore halve both depth and angular precision.
+      i_width: 1280
+      i_height: 800
+      i_fps: 30.0
+      i_enable_ir: false
+
+      # MUST match StereoDepth's subpixel configuration. 5 bits = 1/32 px.
+      # A mismatch scales every depth by a power of two, which produces a
+      # trajectory of the right shape and the wrong size.
+      i_subpixel_fractional_bits: 5
+
+      # Phase 0. Trades retained field of view against rectification stretch
+      # on the 150 deg lens. -1 leaves the StereoDepth default alone.
+      # Expect to land somewhere around 0.0-0.3 targeting ~100-110 deg HFoV.
+      i_alpha_scaling: -1.0
+
+      # ---- Frames -------------------------------------------------------
+      i_odom_frame: odom
+      i_base_frame: oak_vio_frame
+      i_publish_tf: true
+      # Convert from the camera optical convention (x right, y down, z fwd)
+      # to the ROS body convention (x fwd, y left, z up). Leave on unless you
+      # specifically want optical-frame odometry.
+      i_publish_ros_convention: true
+
+      # ---- Feature gating ------------------------------------------------
+      # The floor stays low on purpose. Far points carry most of the rotation
+      # information, and the estimator already down-weights them correctly by
+      # propagating their depth uncertainty, so there is no need to discard
+      # them. Raise this only if Phase 0 shows disparity is unreliable at the
+      # low end.
+      i_min_disparity_px: 1.5
+      i_max_disparity_px: 200.0
+      i_max_tracking_error: 30.0
+      # Phase 0. Fraction of each image edge to ignore, where rectification
+      # stretch on the wide lens degrades corner quality.
+      i_mask_border_fraction: 0.0
+
+      # ---- Feature budget and spatial spread -----------------------------
+      i_num_target_features: 320
+      i_bucket_cols: 8
+      i_bucket_rows: 5
+      i_max_features_per_bucket: 10
+
+      # ---- RANSAC ---------------------------------------------------------
+      i_ransac_min_iterations: 20
+      i_ransac_max_iterations: 200
+      i_ransac_inlier_threshold_px: 2.0
+      i_ransac_confidence: 0.999
+      i_min_inliers: 12
+      i_min_inlier_ratio: 0.35
+
+      # ---- Refinement -----------------------------------------------------
+      i_gn_max_iterations: 10
+      i_huber_delta_px: 1.5
+
+      # ---- Keyframe policy ------------------------------------------------
+      # Set to false for the frame-to-frame A/B drift comparison described in
+      # the README verification section.
+      i_keyframe_referenced: true
+      i_keyframe_min_tracked: 60
+
+      # The most consequential parameter here, and a real optimum rather than
+      # "bigger is better". Too small and parallax vanishes, making translation
+      # unobservable; too large and the keyframe's own triangulation bias
+      # accumulates over the span. Simulation found frame-to-frame beating a
+      # 30-frame span by 2.2-3.6x at brisk motion, and losing by 1.5x when
+      # nearly stationary. A parallax target adapts between those regimes
+      # automatically. 15 px sits just above the observability floor; the
+      # original 60 px produced spans deep into the losing regime.
+      i_keyframe_max_parallax_px: 15.0
+
+      i_keyframe_max_age_frames: 30
+
+      # ---- Motion plausibility -------------------------------------------
+      # Per keyframe span, not per frame, so these are deliberately generous.
+      i_max_translation_per_span_m: 5.0
+      i_max_rotation_per_span_rad: 1.5
+
+      # ---- Noise model ----------------------------------------------------
+      i_pixel_sigma_px: 0.3
+      # Block-matcher disparity NOISE, not the 1/32 px quantisation step.
+      # Measure it in Phase 0 against a flat wall at known range. Using the
+      # quantisation step here understates depth error roughly tenfold.
+      i_disparity_sigma_px: 0.5
+      # The formal covariance came out ~2.7x over-confident in simulation.
+      # Re-derive from real logs once Phase 3 data exists.
+      i_covariance_inflation: 3.0
+
+      i_use_constant_velocity_seed: true
+      i_publish_debug_features: false

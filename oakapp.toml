@@ -1,0 +1,70 @@
+# Standalone OAK App: on-device stereo visual odometry publishing ROS 2 topics.
+#
+# Adapted from the Luxonis ros-driver-basic example, which is the proven recipe
+# for running a ROS driver on an OAK 4. Two changes from that example:
+#   * Kilted -> Jazzy, to match the host ROS installation.
+#   * A build stage, because we ship a compiled C++ package rather than only
+#     installing a prebuilt driver.
+#
+# Deploy with:  oakctl app run .
+
+identifier = "co.autodiscovery.oak4.stereo_vio"
+app_version = "0.1.0"
+
+# Runtime layer: the ROS distro plus the DepthAI ROS packages.
+#
+# PACKAGE NAMING: on Humble and Jazzy the DepthAI v3 packages carry a `_v3`
+# suffix; Kilted and newer dropped it. The metapackage is tried first with the
+# individual packages as a fallback, so this survives either naming. If both
+# fail, exec into the container (`oakctl app exec <id> bash`) and run
+# `apt-cache search depthai` to see what the ROS mirror actually offers.
+prepare_container = [
+    { type = "COPY", source = "resolv.conf", target = "/etc/resolv.conf" },
+    { type = "RUN", command = "apt-get update" },
+    { type = "RUN", command = "apt-get install -y ros-jazzy-depthai-ros-v3 || apt-get install -y ros-jazzy-depthai-ros-driver-v3 ros-jazzy-depthai-bridge-v3 ros-jazzy-depthai-ros-msgs-v3" },
+    { type = "RUN", command = "apt-get install -y ros-jazzy-rmw-cyclonedds-cpp ros-jazzy-tf2-ros ros-jazzy-tf2-geometry-msgs" },
+    { type = "RUN", command = "apt-get clean && rm -rf /var/lib/apt/lists/*" },
+]
+
+# Build layer: compilers and colcon. Discarded after the build, so none of this
+# weight ships in the runtime image.
+prepare_build_container = [
+    { type = "COPY", source = "resolv.conf", target = "/etc/resolv.conf" },
+    { type = "RUN", command = "apt-get update" },
+    { type = "RUN", command = "apt-get install -y build-essential cmake git libeigen3-dev python3-colcon-common-extensions ros-jazzy-ament-cmake ros-jazzy-ament-cmake-gtest ros-jazzy-eigen3-cmake-module ros-jazzy-rosidl-default-generators" },
+]
+
+build_steps = [
+    "cd /app/ros_ws && . /opt/ros/jazzy/setup.sh && colcon build --merge-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF",
+]
+
+entrypoint = [
+    "bash",
+    "-c",
+    ". /opt/ros/jazzy/setup.bash && . /app/ros_ws/install/setup.bash && ros2 launch oak_vio vio.launch.py params_file:=/app/params/vio.yaml",
+]
+
+cwd = "/app"
+stop_grace_period = "15s"
+
+[env]
+# CycloneDDS is what Luxonis recommend when the default middleware misbehaves
+# over the device link, and it is the more predictable choice for the
+# point-to-point Ethernet setup this app targets.
+RMW_IMPLEMENTATION = "rmw_cyclonedds_cpp"
+CYCLONEDDS_URI = "file:///app/params/cyclonedds.xml"
+ROS_DOMAIN_ID = "0"
+# Unbuffered logs, so `oakctl app logs` shows output as it happens rather than
+# in delayed chunks.
+PYTHONUNBUFFERED = "1"
+RCUTILS_LOGGING_USE_STDOUT = "1"
+RCUTILS_COLORIZED_OUTPUT = "0"
+
+[base_image]
+api_url = "https://registry-1.docker.io"
+service = "registry.docker.io"
+oauth_url = "https://auth.docker.io/token"
+auth_type = "repository"
+auth_name = "library/ros"
+image_name = "library/ros"
+image_tag = "jazzy-ros-base"
