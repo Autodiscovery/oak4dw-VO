@@ -69,6 +69,9 @@ class StereoVioNode : public DriverBaseNode {
     std::shared_ptr<dai::node::FeatureTracker> featureTracker_;
     std::shared_ptr<dai::node::Sync> sync_;
     std::shared_ptr<dai::MessageQueue> outputQueue_;
+    /// Bring-up only: lets the empty-observation diagnostic report the pixel
+    /// format being fed to the feature tracker.
+    std::shared_ptr<dai::MessageQueue> rectifiedLeftDebugQueue_;
 
     std::string syncQueueName_;
     std::string disparityKey_;

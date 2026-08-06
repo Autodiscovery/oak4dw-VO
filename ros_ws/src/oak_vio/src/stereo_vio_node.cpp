@@ -193,9 +193,28 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     // same frame the estimator's camera model describes.
     featureTracker_ = pipeline->create<dai::node::FeatureTracker>();
     const auto targetFeatures = static_cast<int>(getROSNode()->get_parameter("vio.i_num_target_features").as_int());
+
+    // Select the corner detector explicitly rather than relying on a default.
+    // The reference example does this, and without it the tracker emitted
+    // messages containing zero corners -- alive, but detecting nothing.
+    featureTracker_->initialConfig->setCornerDetector(dai::FeatureTrackerConfig::CornerDetector::Type::HARRIS);
     featureTracker_->initialConfig->setNumTargetFeatures(targetFeatures);
     featureTracker_->initialConfig->setMotionEstimator(true);
+
+    // Reserve the tracker's compute. Optical flow needs 2 shaves / 2 memory
+    // slices, corner detection alone needs 1. The naming is RVC2 heritage and
+    // this may be a no-op on RVC4, but it is the documented way to allocate the
+    // resources and omitting it is the other candidate for producing no corners.
+    featureTracker_->setHardwareResources(2, 2);
+
     stereo_->rectifiedLeft.link(featureTracker_->inputImage);
+
+    // Bring-up aid: lets the failure diagnostic report the pixel format the
+    // tracker is actually being fed. The reference example inserts an
+    // ImageManip to guarantee GRAY8, so a format the tracker will not accept is
+    // a live possibility. Local memory, not XLink -- the app runs on the device
+    // -- so this costs a memcpy, not bandwidth. Remove once bring-up is done.
+    rectifiedLeftDebugQueue_ = stereo_->rectifiedLeft.createOutputQueue(1, false);
 
     // ---- Sync ------------------------------------------------------------
     // Pairs disparity with the feature list by timestamp. Without this the
@@ -322,6 +341,10 @@ void StereoVioNode::closeQueues() {
         outputQueue_->close();
         outputQueue_.reset();
     }
+    if(rectifiedLeftDebugQueue_) {
+        rectifiedLeftDebugQueue_->close();
+        rectifiedLeftDebugQueue_.reset();
+    }
     vio_.reset();
 }
 
@@ -406,6 +429,29 @@ void StereoVioNode::onFrame(const std::shared_ptr<dai::MessageGroup>& group) {
                              data.size(),
                              expectedBytes,
                              100.0 * static_cast<double>(nonZero) / static_cast<double>(std::max<std::size_t>(sampled, 1)));
+
+        // What is the tracker actually being fed? A format it will not accept
+        // would explain corners being detected in nothing.
+        if(rectifiedLeftDebugQueue_ != nullptr) {
+            if(const auto rectified = std::dynamic_pointer_cast<dai::ImgFrame>(rectifiedLeftDebugQueue_->tryGet())) {
+                RCLCPP_WARN_THROTTLE(getLogger(),
+                                     *getROSNode()->get_clock(),
+                                     3000,
+                                     "  tracker input (rectifiedLeft): %ux%u type=%d bytes=%zu "
+                                     "(GRAY8 would be %zu bytes at this size)",
+                                     rectified->getWidth(),
+                                     rectified->getHeight(),
+                                     static_cast<int>(rectified->getType()),
+                                     rectified->getData().size(),
+                                     static_cast<std::size_t>(rectified->getWidth()) * rectified->getHeight());
+            } else {
+                RCLCPP_WARN_THROTTLE(getLogger(),
+                                     *getROSNode()->get_clock(),
+                                     3000,
+                                     "  rectifiedLeft produced no frame -- the tracker is receiving nothing, "
+                                     "which would explain zero corners.");
+            }
+        }
     }
 
     const auto deviceStamp = disparityFrame->getTimestamp();
