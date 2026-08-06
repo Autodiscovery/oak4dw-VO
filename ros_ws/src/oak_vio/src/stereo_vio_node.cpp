@@ -223,12 +223,43 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     stereo_->rectifiedLeft.link(imageManip_->inputImage);
     imageManip_->out.link(featureTracker_->inputImage);
 
-    // Bring-up aid: lets the failure diagnostic report the pixel format the
-    // tracker is actually being fed. Now taps the manip output, which is what
-    // the tracker really sees. Local memory, not XLink -- the app runs on the
-    // device -- so this costs a memcpy, not bandwidth. Remove once bring-up is
-    // done.
-    rectifiedLeftDebugQueue_ = imageManip_->out.createOutputQueue(1, false);
+    // ---- Bring-up instrumentation ----------------------------------------
+    //
+    // Three rounds of hypotheses about the feature tracker have now been wrong,
+    // and the output rate has sat at exactly 10 Hz against 30 configured the
+    // whole time. Those are probably the same fault, so measure each stage
+    // rather than guess again: if the camera runs at 30 and the tracker emits
+    // at 10, the tracker is the bottleneck; if everything runs at 10, the
+    // cameras never reached the requested rate.
+    //
+    // Local memory, not XLink -- the app runs on the device -- so this costs a
+    // memcpy per frame, not bandwidth. Remove once bring-up is finished.
+    cameraRate_.queue = leftOutput->createOutputQueue(1, false);
+    cameraRate_.queue->addCallback([this](const std::shared_ptr<dai::ADatatype>&) { ++cameraRate_.count; });
+
+    disparityRate_.queue = stereo_->disparity.createOutputQueue(1, false);
+    disparityRate_.queue->addCallback([this](const std::shared_ptr<dai::ADatatype>&) { ++disparityRate_.count; });
+
+    manipRate_.queue = imageManip_->out.createOutputQueue(1, false);
+    manipRate_.queue->addCallback([this](const std::shared_ptr<dai::ADatatype>& message) {
+        ++manipRate_.count;
+        if(const auto frame = std::dynamic_pointer_cast<dai::ImgFrame>(message)) {
+            lastManipType_ = static_cast<int>(frame->getType());
+            lastManipWidth_ = frame->getWidth();
+            lastManipHeight_ = frame->getHeight();
+            lastManipBytes_ = frame->getData().size();
+        }
+    });
+
+    // The decisive one: does the tracker emit at its input rate, and is every
+    // message it emits actually empty?
+    featureRate_.queue = featureTracker_->outputFeatures.createOutputQueue(1, false);
+    featureRate_.queue->addCallback([this](const std::shared_ptr<dai::ADatatype>& message) {
+        ++featureRate_.count;
+        if(const auto tracked = std::dynamic_pointer_cast<dai::TrackedFeatures>(message)) {
+            lastFeatureCount_ = tracked->trackedFeatures.size();
+        }
+    });
 
     // ---- Sync ------------------------------------------------------------
     // Pairs disparity with the feature list by timestamp. Without this the
@@ -355,9 +386,11 @@ void StereoVioNode::closeQueues() {
         outputQueue_->close();
         outputQueue_.reset();
     }
-    if(rectifiedLeftDebugQueue_) {
-        rectifiedLeftDebugQueue_->close();
-        rectifiedLeftDebugQueue_.reset();
+    for(StageRate* stage : {&cameraRate_, &manipRate_, &disparityRate_, &featureRate_}) {
+        if(stage->queue) {
+            stage->queue->close();
+            stage->queue.reset();
+        }
     }
     vio_.reset();
 }
@@ -444,30 +477,45 @@ void StereoVioNode::onFrame(const std::shared_ptr<dai::MessageGroup>& group) {
                              expectedBytes,
                              100.0 * static_cast<double>(nonZero) / static_cast<double>(std::max<std::size_t>(sampled, 1)));
 
-        // What is the tracker actually being fed? A format it will not accept
-        // would explain corners being detected in nothing.
-        if(rectifiedLeftDebugQueue_ != nullptr) {
-            if(const auto rectified = std::dynamic_pointer_cast<dai::ImgFrame>(rectifiedLeftDebugQueue_->tryGet())) {
-                RCLCPP_WARN_THROTTLE(getLogger(),
-                                     *getROSNode()->get_clock(),
-                                     3000,
-                                     "  tracker input (after ImageManip): %ux%u type=%d bytes=%zu "
-                                     "-- GRAY8 is type=%d; if it is not, the RAW8->GRAY8 conversion "
-                                     "did not take and the tracker will find nothing",
-                                     rectified->getWidth(),
-                                     rectified->getHeight(),
-                                     static_cast<int>(rectified->getType()),
-                                     rectified->getData().size(),
-                                     static_cast<int>(dai::ImgFrame::Type::GRAY8));
-            } else {
-                RCLCPP_WARN_THROTTLE(getLogger(),
-                                     *getROSNode()->get_clock(),
-                                     3000,
-                                     "  rectifiedLeft produced no frame -- the tracker is receiving nothing, "
-                                     "which would explain zero corners.");
-            }
-        }
+        RCLCPP_WARN_THROTTLE(getLogger(),
+                             *getROSNode()->get_clock(),
+                             3000,
+                             "  tracker input (after ImageManip): %ux%u type=%d bytes=%zu (GRAY8 is type=%d)",
+                             lastManipWidth_.load(),
+                             lastManipHeight_.load(),
+                             lastManipType_.load(),
+                             lastManipBytes_.load(),
+                             static_cast<int>(dai::ImgFrame::Type::GRAY8));
     }
+
+    // Per-stage rates. This is what localises the bottleneck: compare the
+    // camera's actual rate against the tracker's, and the tracker's output rate
+    // against its input rate.
+    const auto now = std::chrono::steady_clock::now();
+    if(lastRateLog_.time_since_epoch().count() == 0) {
+        lastRateLog_ = now;
+    } else if(now - lastRateLog_ >= std::chrono::seconds(5)) {
+        const double elapsed = std::chrono::duration<double>(now - lastRateLog_).count();
+        const auto rate = [elapsed](StageRate& stage) {
+            const std::uint64_t current = stage.count.load();
+            const double hz = static_cast<double>(current - stage.previous) / elapsed;
+            stage.previous = current;
+            return hz;
+        };
+        RCLCPP_INFO(getLogger(),
+                    "VO stage rates (Hz): camera %.1f -> stereo.disparity %.1f | manip %.1f -> tracker %.1f "
+                    "(last message carried %zu features) | synced %.1f, requested %.1f",
+                    rate(cameraRate_),
+                    rate(disparityRate_),
+                    rate(manipRate_),
+                    rate(featureRate_),
+                    lastFeatureCount_.load(),
+                    static_cast<double>(frameIndexDelta_) / elapsed,
+                    fps_);
+        frameIndexDelta_ = 0;
+        lastRateLog_ = now;
+    }
+    ++frameIndexDelta_;
 
     const auto deviceStamp = disparityFrame->getTimestamp();
     const double seconds = std::chrono::duration<double>(deviceStamp.time_since_epoch()).count();

@@ -11,6 +11,9 @@
 // share the pipeline and therefore the device.
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -72,9 +75,30 @@ class StereoVioNode : public DriverBaseNode {
     std::shared_ptr<dai::node::FeatureTracker> featureTracker_;
     std::shared_ptr<dai::node::Sync> sync_;
     std::shared_ptr<dai::MessageQueue> outputQueue_;
-    /// Bring-up only: lets the empty-observation diagnostic report the pixel
-    /// format being fed to the feature tracker.
-    std::shared_ptr<dai::MessageQueue> rectifiedLeftDebugQueue_;
+
+    /// Bring-up instrumentation. Counts messages leaving each stage so the
+    /// pipeline's rate bottleneck can be localised by measurement instead of
+    /// hypothesis. Remove once bring-up is finished.
+    struct StageRate {
+        std::shared_ptr<dai::MessageQueue> queue;
+        std::atomic<std::uint64_t> count{0};
+        std::uint64_t previous{0};
+    };
+    StageRate cameraRate_;
+    StageRate manipRate_;
+    StageRate disparityRate_;
+    StageRate featureRate_;
+    std::chrono::steady_clock::time_point lastRateLog_{};
+    /// Synced frames since the last rate report.
+    std::uint64_t frameIndexDelta_{0};
+
+    /// Last frame seen entering the tracker, and the last feature count leaving
+    /// it. Recorded in the counting callbacks so no extra queue is needed.
+    std::atomic<int> lastManipType_{-1};
+    std::atomic<unsigned> lastManipWidth_{0};
+    std::atomic<unsigned> lastManipHeight_{0};
+    std::atomic<std::size_t> lastManipBytes_{0};
+    std::atomic<std::size_t> lastFeatureCount_{0};
 
     std::string syncQueueName_;
     std::string disparityKey_;
