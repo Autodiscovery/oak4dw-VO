@@ -358,9 +358,53 @@ def cmd_noise(args) -> int:
             print(f"\n  The plane-fit residual is {plane / max(sigma, 1e-6):.0f}x the temporal noise. On a flat wall")
             print("  that gap is model error, not sensor noise: disparity is only linear across a")
             print("  plane for an ideal rectified pinhole, so a large residual says the rectified")
-            print("  pair is not behaving as one. That matters for absolute scale and for the")
-            print("  wide-lens question in the README -- but it is NOT sigma_d, and it must not be")
-            print("  used as one.")
+            print("  pair is not behaving as one. That is NOT sigma_d and must not be used as one.")
+
+    # --- Where does the pinhole model break down? --------------------------
+    #
+    # Fit the plane on the CENTRAL region, where distortion is smallest and the
+    # model has the best chance of holding, then evaluate the residual across the
+    # whole frame in rings out from the centre.
+    #
+    # A flat profile means the residual is texture and mismatching. A profile that
+    # grows with radius is uncorrected lens distortion surviving rectification --
+    # which on a 150 deg fisheye is exactly what one would expect, and it says
+    # where to stop trusting features (vio.i_mask_border_fraction).
+    reference = np.median(volume, axis=0)
+    h, w = reference.shape
+    ys, xs = np.mgrid[0:h, 0:w]
+    y0, y1, x0, x1 = int(0.4 * h), int(0.6 * h), int(0.4 * w), int(0.6 * w)
+
+    core = np.zeros_like(reference, dtype=bool)
+    core[y0:y1, x0:x1] = True
+    core &= reference > 0.5
+
+    if core.sum() > 500:
+        A = np.column_stack([xs[core], ys[core], np.ones(core.sum())])
+        coeffs, *_ = np.linalg.lstsq(A, reference[core], rcond=None)
+
+        valid = reference > 0.5
+        predicted = coeffs[0] * xs + coeffs[1] * ys + coeffs[2]
+        residual = np.abs(reference - predicted)
+        radius = np.hypot(xs - w / 2.0, ys - h / 2.0)
+        max_radius = np.hypot(w / 2.0, h / 2.0)
+
+        print("\n  Deviation from the fitted plane, by distance from image centre")
+        print("  (plane fitted on the central 20% only, then extrapolated outward):")
+        print(f"    {'radius':>14}  {'median |resid|':>14}  {'as % of disparity':>18}")
+        edges = np.linspace(0.0, max_radius, 7)
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            ring = valid & (radius >= lo) & (radius < hi)
+            if ring.sum() < 200:
+                continue
+            med = float(np.median(residual[ring]))
+            disp = float(np.median(reference[ring]))
+            frac = 100.0 * med / disp if disp > 0.5 else float("nan")
+            print(f"    {100 * lo / max_radius:5.0f}-{100 * hi / max_radius:3.0f}% "
+                  f"{med:>14.2f}  {frac:>17.1f}%")
+        print("    Flat profile -> residual is texture and mismatching, model is fine.")
+        print("    Rising profile -> uncorrected distortion; the radius where it passes a few")
+        print("    percent is where to set vio.i_mask_border_fraction.")
 
     print(f"\n  Set in params/vio.yaml:   vio.i_disparity_sigma_px: {sigma:.2f}")
     print("  (the temporal figure -- the plane-fit residual above is a different quantity)")

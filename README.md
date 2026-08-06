@@ -653,10 +653,34 @@ one interface.
   with Phase 0 `rectify` and by comparing against the driver's rectified
   `camera_info`. **Do not trust absolute scale until this is settled** —
   rotation and trajectory shape are unaffected.
-- **Phase 0 has not been run.** Other than the intrinsics above, every
-  optics-derived number here comes from the published FoV spec rather than your
-  device. Pinhole rectification of this lens will cost field of view; how much
-  is a measurement, not a calculation.
+- **Phase 0 results, and what they leave open.** Measured on the device:
+
+  | Quantity | Value | Consequence |
+  |---|---|---|
+  | Disparity noise σ_d (temporal) | **0.425 px** | now set in `params/vio.yaml`; the 0.5 px placeholder was close |
+  | Plane-fit residual over a flat wall | **4.81 px** | 11× the noise — the rectified pair is *not* an ideal pinhole |
+  | Epipolar error | 0.84–0.96 px | but on only a **6.4% match acceptance rate**, so indicative at best |
+  | Valid disparity | 13% | low; solved pixels scattered over an 85% bounding box |
+  | Alpha scaling 0.0 / 0.5 / 1.0 | no effect on anything | `setAlphaScaling` appears to be a **no-op on RVC4** |
+
+  The plane-fit result is the one that matters. Disparity is linear across a plane
+  only for an ideal rectified pinhole, so an 11× excess over sensor noise says the
+  pinhole model does not describe this rectified pair — roughly 15% depth error
+  from model error alone at the ~1.1 m test range. That is the raw-versus-rectified
+  intrinsics question showing up as a measurement rather than a suspicion, and it
+  is why absolute scale is still not trustworthy.
+
+  What it does not yet say is *whether* that is uncorrected fisheye distortion.
+  The `noise` subcommand now fits the plane on the central 20% and reports the
+  deviation in rings outward: a flat profile means texture and mismatching, a
+  rising profile means distortion surviving rectification, and the radius where it
+  passes a few percent is where `i_mask_border_fraction` should sit. Worth running
+  before deciding anything larger — the Kannala-Brandt fallback is a big change to
+  reach for on the strength of one aggregate number.
+
+  Note the test range matters: at 1.1 m from the wall, a wide lens is at its most
+  non-linear. The same measurement at 3–5 m would likely look better, and typical
+  VO ranges are further out than this test was.
 - **DepthAI API details need a compile.** There is no C++ toolchain on the
   machine this was written on, so `stereo_vio_node.cpp` and
   `stereo_vio_pipeline.cpp` are written against the documented v3 API and the

@@ -62,9 +62,11 @@
       # trajectory of the right shape and the wrong size.
       i_subpixel_fractional_bits: 5
 
-      # Phase 0. Trades retained field of view against rectification stretch
-      # on the 150 deg lens. -1 leaves the StereoDepth default alone.
-      # Expect to land somewhere around 0.0-0.3 targeting ~100-110 deg HFoV.
+      # Left at -1 (StereoDepth's default): alpha scaling appears to do NOTHING on
+      # RVC4. Measured across 0.0 / 0.5 / 1.0 with no effect on valid disparity
+      # (13.0 / 13.0 / 13.4%), epipolar error (0.91 / 0.96 / 0.84 px) or the solved
+      # region (85.5 / 86.0 / 85.1%). The field-of-view versus rectification-stretch
+      # trade the plan assumed this controlled is not available here.
       i_alpha_scaling: -1.0
 
       # ---- Frames -------------------------------------------------------
@@ -161,10 +163,17 @@
 
       # ---- Noise model ----------------------------------------------------
       i_pixel_sigma_px: 0.3
-      # Block-matcher disparity NOISE, not the 1/32 px quantisation step.
-      # Measure it in Phase 0 against a flat wall at known range. Using the
-      # quantisation step here understates depth error roughly tenfold.
-      i_disparity_sigma_px: 0.5
+      # MEASURED on this device: 0.425 px, from the temporal standard deviation of
+      # disparity per pixel with the camera held still (Phase 0 'noise'). That is
+      # the honest sigma_d -- it assumes nothing about the scene or the camera
+      # model. Spread across pixels was p10 0.075, p90 1.112.
+      #
+      # For contrast, the subpixel quantisation step is 0.031 px, so using that as
+      # the noise would understate it 14x. And the plane-fit residual over a flat
+      # wall was 4.81 px -- 11x this figure -- but that is model error from the
+      # rectified pair not behaving as an ideal pinhole, not sensor noise. Neither
+      # belongs here.
+      i_disparity_sigma_px: 0.425
       # The formal covariance came out ~2.7x over-confident in simulation.
       # Re-derive from real logs once Phase 3 data exists.
       i_covariance_inflation: 3.0
