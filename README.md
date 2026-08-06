@@ -524,13 +524,40 @@ ready to file once the two version numbers are filled in.
 
 **Consequence for this design.** The plan's cost argument rested on the RVC4
 doing Harris and Lucas-Kanade in fixed-function hardware for free. That is
-currently unavailable, so the front-end has to move to the ARM cores — roughly
-25 ms/frame that was supposed to be free. The plan listed this as a known risk
-with a CPU fallback as the contingency; it has simply come to pass.
+currently unavailable, so the front-end has moved to the ARM cores. The plan
+listed this as a known risk with a CPU fallback as the contingency; it has
+simply come to pass.
 
-Nothing about the estimator changes. It consumes `(id, u, v, disparity)` tuples
-and does not care where corners come from, so this is contained to the front
-end. Everything validated in `tools/validate_estimator_math.py` still stands.
+### What replaced it
+
+[`cpu_feature_tracker.hpp`](ros_ws/src/oak_vio/include/oak_vio/cpu_feature_tracker.hpp)
+— OpenCV `goodFeaturesToTrack` (Harris) plus `calcOpticalFlowPyrLK`, presenting
+the *same* contract the hardware node was supposed to: observations carrying a
+stable ID across frames, an age, and a tracking error. That is the entire
+interface the estimator depends on, so **nothing downstream changed** —
+keyframing, RANSAC, the Jacobians and the covariance work are all untouched, and
+everything validated in `tools/validate_estimator_math.py` still holds.
+
+Two things it does that the hardware block did not:
+
+- **Subpixel refinement** on new corners (`cornerSubPix`). Cheap at these counts,
+  and corner localisation error propagates straight into pose error.
+- **Forward-backward consistency**: track forward, then back, and drop points
+  that do not return to where they started. A mistracked corner can have a
+  perfectly small forward LK residual, so the error threshold alone is not
+  enough. Costs a second LK pass; disable with
+  `vio.i_forward_backward_check: false`.
+
+The cost, and the reason tracking now runs at **640×400** rather than 1280×800:
+roughly 8–12 ms/frame on one core versus 25–40 at full resolution. The trade is
+a halved focal length, so depth sigma at 5 m goes from ~29 cm to ~59 cm. Watch
+the `tracker N ms` figure in the periodic log and raise `vio.i_width` /
+`vio.i_height` if you would rather spend the CPU.
+
+If CPU becomes the binding constraint, the device reports an **Adreno 740v2 GPU
+as enabled and otherwise idle**, so an OpenCL Harris implementation is a real
+option — a bigger piece of work, but the front-end is already isolated behind
+one interface.
 
 ## Known gaps
 

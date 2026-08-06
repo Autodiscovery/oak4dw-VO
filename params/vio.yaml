@@ -16,14 +16,20 @@
 
     vio:
       # ---- Sensor configuration ----------------------------------------
-      # Full 1280x800. CPU cost is proportional to feature count, not
-      # resolution, and the HW blocks handle 800p at 60 FPS, so there is no
-      # reason to bin. Halving resolution would halve the focal length and
-      # therefore halve both depth and angular precision.
-      i_width: 1280
-      i_height: 800
+      # 640x400, not the 1280x800 originally planned.
+      #
+      # The plan assumed corner detection and tracking would be free on the RVC4
+      # hardware block, making resolution almost cost-free. That block is broken
+      # on this firmware (see docs/luxonis-bug-featuretracker-rvc4.md), so
+      # tracking runs on the ARM cores and resolution now costs CPU directly:
+      # roughly 8-12 ms/frame here versus 25-40 at full resolution.
+      #
+      # The price is a halved focal length, so depth sigma at 5 m goes from
+      # ~29 cm to ~59 cm. Raise these if you would rather spend the CPU, and
+      # watch the "tracker N ms" figure in the periodic log.
+      i_width: 640
+      i_height: 400
       i_fps: 30.0
-      i_enable_ir: false
 
       # MUST match StereoDepth's subpixel configuration. 5 bits = 1/32 px.
       # A mismatch scales every depth by a power of two, which produces a
@@ -57,8 +63,37 @@
       # stretch on the wide lens degrades corner quality.
       i_mask_border_fraction: 0.0
 
-      # ---- Feature budget and spatial spread -----------------------------
-      i_num_target_features: 320
+      # ---- CPU feature detection and tracking ----------------------------
+      # OpenCV goodFeaturesToTrack + calcOpticalFlowPyrLK, replacing the broken
+      # hardware block. These are the knobs that trade accuracy against the
+      # per-frame CPU cost.
+      i_max_features: 320
+      # Corner strength floor, relative to the strongest corner in the frame.
+      i_quality_level: 0.01
+      # Minimum corner separation, and the redetection mask radius.
+      i_min_feature_distance_px: 12.0
+      i_detector_block_size: 7
+      # Harris rather than Shi-Tomasi, matching what the hardware block did.
+      i_use_harris: true
+      # Subpixel refinement. Cheap at these counts, and corner localisation
+      # error feeds straight into pose error.
+      i_refine_subpixel: true
+      i_lk_window_size: 21
+      i_lk_pyramid_levels: 3
+      # No real feature moves this far between frames at 30 FPS.
+      i_max_displacement_px: 80.0
+      # Track forward then back and require the round trip to return home. A
+      # mistracked corner can have a small forward residual, so this catches
+      # failures the error threshold alone accepts. Costs a second LK pass.
+      i_forward_backward_check: true
+      i_forward_backward_threshold_px: 1.0
+      # Top up with fresh corners once surviving tracks fall below this.
+      i_redetect_below: 200
+      # LK is unreliable at the frame edges, and the rectified periphery of this
+      # wide lens is stretched.
+      i_border_margin_px: 12
+
+      # ---- Spatial spread -------------------------------------------------
       i_bucket_cols: 8
       i_bucket_rows: 5
       i_max_features_per_bucket: 10

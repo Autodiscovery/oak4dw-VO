@@ -1,12 +1,11 @@
 # Bug report: FeatureTracker non-functional on RVC4 (OAK-4-D-W)
 
-Ready to file at <https://github.com/luxonis/depthai-core/issues>. Fill in the
-two version numbers marked TODO before submitting — get them with:
+Ready to file at <https://github.com/luxonis/depthai-core/issues>. One version
+number is still marked TODO — get it with:
 
 ```bash
-oakctl device info          # Luxonis OS version
-dpkg -l | grep depthai      # depthai / ros-jazzy-depthai-v3 versions
-python3 -c "import depthai; print(depthai.__version__)"
+python3 -c "import depthai; print(depthai.__version__)"   # host-side probe
+oakctl app exec <app-id> dpkg -l | grep depthai           # in-container version
 ```
 
 ---
@@ -34,11 +33,13 @@ crashes the firmware rather than failing gracefully.
 
 | | |
 |---|---|
-| Device | OAK-4-D-W |
-| Platform | RVC4 |
+| Device | OAK-4-D-W (reported model: Luxonis, Inc. OAK4-D R9) |
+| Platform | RVC4, linux/arm64 |
+| Luxonis OS | **RVC4 1.37.0** |
+| oakctl agent | 0.25.0 (rvc4) |
 | Device ID | 3549741690 |
+| GPU | Adreno 740v2, enabled |
 | Connection | PoE, 192.168.10.118 |
-| Luxonis OS | **TODO** |
 | depthai | **TODO** (installed via `ros-jazzy-depthai-v3`) |
 | Host | Ubuntu 24.04, ROS 2 Jazzy, Python 3.12 |
 

@@ -83,9 +83,17 @@ find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
+# OpenCV supplies the CPU corner detector and Lucas-Kanade tracker that stand in
+# for the broken RVC4 hardware block. Apache-2.0, so no licensing problem.
+# Deliberately NOT linked into oak_vio_core: the estimator stays dependency-free
+# so its tests keep running anywhere.
+find_package(OpenCV REQUIRED COMPONENTS core imgproc video)
+message(STATUS "oak_vio: OpenCV ${OpenCV_VERSION}")
+
 add_library(oak_vio_pipeline_plugin SHARED
   src/stereo_vio_pipeline.cpp
   src/stereo_vio_node.cpp
+  src/cpu_feature_tracker.cpp
 )
 target_include_directories(oak_vio_pipeline_plugin PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -100,7 +108,8 @@ target_include_directories(oak_vio_pipeline_plugin PUBLIC
 # call has to be plain too. It still propagates oak_vio_core's PUBLIC include
 # directories and its Eigen dependency -- the plain form is equivalent to
 # LINK_PUBLIC.
-target_link_libraries(oak_vio_pipeline_plugin oak_vio_core)
+target_link_libraries(oak_vio_pipeline_plugin oak_vio_core ${OpenCV_LIBRARIES})
+target_include_directories(oak_vio_pipeline_plugin PRIVATE ${OpenCV_INCLUDE_DIRS})
 ament_target_dependencies(oak_vio_pipeline_plugin
   ${DEPTHAI_PKGS}
   geometry_msgs
@@ -155,5 +164,5 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 ament_export_include_directories(include)
 ament_export_libraries(oak_vio_core oak_vio_pipeline_plugin)
-ament_export_dependencies(Eigen3 ${DEPTHAI_PKGS} rclcpp pluginlib)
+ament_export_dependencies(Eigen3 OpenCV ${DEPTHAI_PKGS} rclcpp pluginlib)
 ament_package()

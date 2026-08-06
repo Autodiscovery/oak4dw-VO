@@ -27,6 +27,9 @@
   <depend>depthai_ros_msgs_v3</depend>
 
   <depend>eigen</depend>
+  <!-- CPU corner detection and Lucas-Kanade tracking, standing in for the
+       non-functional RVC4 hardware feature tracker. -->
+  <depend>libopencv-dev</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>oak_vio_msgs</depend>

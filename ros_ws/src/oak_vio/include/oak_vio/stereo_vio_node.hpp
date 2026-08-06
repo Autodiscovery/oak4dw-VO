@@ -1,14 +1,17 @@
 // depthai_ros_driver dai_node that owns the VO half of the pipeline and
 // publishes its results.
 //
-// It builds its own Camera / StereoDepth / FeatureTracker / Sync subgraph
-// inside the driver's pipeline rather than reusing the driver's sensor node
-// wrappers. That keeps our dependency on driver internals down to two stable
-// base classes (BaseNode, BasePipeline) instead of the whole dai_nodes tree,
-// at the cost of not inheriting the driver's per-sensor parameter surface for
-// these two cameras. If you later want the driver's RGB or NN topics as well,
-// add them in StereoVioPipeline::createPipeline alongside this node — they
-// share the pipeline and therefore the device.
+// It builds its own Camera / StereoDepth / Sync subgraph inside the driver's
+// pipeline rather than reusing the driver's sensor node wrappers. That keeps our
+// dependency on driver internals down to two stable base classes (BaseNode,
+// BasePipeline) instead of the whole dai_nodes tree. If you later want the
+// driver's RGB or NN topics as well, add them in
+// StereoVioPipeline::createPipeline alongside this node -- they share the
+// pipeline and therefore the device.
+//
+// Feature detection and tracking run on the CPU via CpuFeatureTracker, NOT on
+// the RVC4 hardware feature-tracker block. The hardware node is non-functional
+// on this firmware; see docs/luxonis-bug-featuretracker-rvc4.md.
 #pragma once
 
 #include <atomic>
@@ -21,10 +24,12 @@
 #include <depthai/depthai.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <oak_vio_msgs/msg/vio_status.hpp>
+#include <opencv2/core.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "oak_vio/cpu_feature_tracker.hpp"
 #include "oak_vio/driver_compat.hpp"
 #include "oak_vio/stereo_vio.hpp"
 
@@ -47,18 +52,21 @@ class StereoVioNode : public DriverBaseNode {
 
    private:
     void declareParams();
-
     // Neither of the next two can be const: BaseNode::getROSNode() and
     // BaseNode::getLogger() are non-const accessors, so calling them from a
     // const member discards qualifiers. Logically both are read-only.
-    /// Re-read every `vio.*` parameter into params_. Safe to call at runtime.
     VioParams readParams();
+    CpuTrackerParams readTrackerParams();
 
     /// Pull the rectified intrinsics and baseline off the device.
     RectifiedCamera readCameraModel(const std::shared_ptr<dai::Device>& device);
 
-    /// Callback on the synced (disparity, features) message group.
+    /// Callback on the synced (rectifiedLeft, disparity) message group.
     void onFrame(const std::shared_ptr<dai::MessageGroup>& group);
+
+    /// Wrap a GRAY8/RAW8 ImgFrame as a cv::Mat without copying. Returns an empty
+    /// Mat if the buffer is too small for the reported dimensions.
+    [[nodiscard]] cv::Mat wrapGrayFrame(const std::shared_ptr<dai::ImgFrame>& frame);
 
     void publish(const VioFrameResult& result, const rclcpp::Time& stamp);
 
@@ -69,50 +77,15 @@ class StereoVioNode : public DriverBaseNode {
     std::shared_ptr<dai::node::Camera> leftCamera_;
     std::shared_ptr<dai::node::Camera> rightCamera_;
     std::shared_ptr<dai::node::StereoDepth> stereo_;
-    /// Converts rectifiedLeft from RAW8 to GRAY8. The feature tracker silently
-    /// finds nothing in RAW8, so this is load-bearing, not cosmetic.
-    std::shared_ptr<dai::node::ImageManip> imageManip_;
-    std::shared_ptr<dai::node::FeatureTracker> featureTracker_;
     std::shared_ptr<dai::node::Sync> sync_;
     std::shared_ptr<dai::MessageQueue> outputQueue_;
 
-    /// Bring-up instrumentation. Counts messages leaving each stage so the
-    /// pipeline's rate bottleneck can be localised by measurement instead of
-    /// hypothesis. Remove once bring-up is finished.
-    struct StageRate {
-        std::shared_ptr<dai::MessageQueue> queue;
-        std::atomic<std::uint64_t> count{0};
-        std::uint64_t previous{0};
-    };
-    StageRate cameraRate_;
-    StageRate manipRate_;
-    StageRate disparityRate_;
-    StageRate featureRate_;
-    std::chrono::steady_clock::time_point lastRateLog_{};
-    /// Synced frames since the last rate report.
-    std::uint64_t frameIndexDelta_{0};
-
-    /// Last frame seen entering the tracker, and the last feature count leaving
-    /// it. Recorded in the counting callbacks so no extra queue is needed.
-    std::atomic<int> lastManipType_{-1};
-    std::atomic<unsigned> lastManipWidth_{0};
-    std::atomic<unsigned> lastManipHeight_{0};
-    std::atomic<std::size_t> lastManipBytes_{0};
-    /// Pixel statistics of the frame entering the tracker. A near-zero std
-    /// means it is being fed a blank image and the fault is upstream of it.
-    std::atomic<double> lastManipMean_{0.0};
-    std::atomic<double> lastManipStd_{0.0};
-    std::atomic<std::size_t> lastFeatureCount_{0};
-    /// Auto-exposure state. An exposure near the frame period means AE is what
-    /// is capping the frame rate, and a dim frame is why there are no corners.
-    std::atomic<long> lastExposureUs_{0};
-    std::atomic<int> lastSensitivityIso_{0};
-
     std::string syncQueueName_;
     std::string disparityKey_;
-    std::string featuresKey_;
+    std::string rectifiedKey_;
 
     // --- Estimator ---------------------------------------------------------
+    std::unique_ptr<CpuFeatureTracker> tracker_;
     std::unique_ptr<StereoVio> vio_;
     VioParams params_;
 
@@ -123,16 +96,26 @@ class StereoVioNode : public DriverBaseNode {
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr resetService_;
 
     // --- Configuration -----------------------------------------------------
-    int width_{1280};
-    int height_{800};
+    int width_{640};
+    int height_{400};
     double fps_{30.0};
     int subpixelFractionalBits_{5};
     std::string odomFrame_{"odom"};
     std::string baseFrame_{"oak_vio_frame"};
     bool publishTf_{true};
     bool rosConvention_{true};
-    bool enableIr_{false};
     float alphaScaling_{-1.0F};
+
+    // --- Timing / health ---------------------------------------------------
+    /// Wall-clock cost of the CPU tracker, which is the one part of this
+    /// pipeline that is no longer free. Reported so the LENS budget stays honest.
+    double trackerMsEma_{0.0};
+    std::chrono::steady_clock::time_point lastRateLog_{};
+    std::uint64_t framesSinceLog_{0};
+    std::atomic<std::uint64_t> cameraFrames_{0};
+    std::shared_ptr<dai::MessageQueue> cameraRateQueue_;
+    std::atomic<long> lastExposureUs_{0};
+    std::atomic<int> lastSensitivityIso_{0};
 
     /// Rotation from the camera optical frame (x right, y down, z forward) to
     /// the ROS body convention (x forward, y left, z up). Applied to the pose,
