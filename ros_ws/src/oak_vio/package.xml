@@ -38,6 +38,9 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>tf2_ros</depend>
 
+  <!-- vio.launch.py is the app entrypoint. -->
+  <exec_depend>ros2launch</exec_depend>
+
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
 

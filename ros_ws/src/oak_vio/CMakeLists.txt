@@ -45,18 +45,24 @@ target_link_libraries(oak_vio_core PUBLIC Eigen3::Eigen)
 # it. Resolve either so this builds on both without edits.
 # ---------------------------------------------------------------------------
 set(DEPTHAI_PKGS "")
+set(DEPTHAI_DRIVER_PKG "")
 foreach(base depthai depthai_bridge depthai_ros_driver depthai_ros_msgs)
-  if(NOT DEFINED ${base}_RESOLVED)
-    find_package(${base}_v3 QUIET)
-    if(${base}_v3_FOUND)
-      list(APPEND DEPTHAI_PKGS ${base}_v3)
-    else()
-      find_package(${base} REQUIRED)
-      list(APPEND DEPTHAI_PKGS ${base})
-    endif()
+  find_package(${base}_v3 QUIET)
+  if(${base}_v3_FOUND)
+    set(resolved "${base}_v3")
+  else()
+    find_package(${base} REQUIRED)
+    set(resolved "${base}")
+  endif()
+  list(APPEND DEPTHAI_PKGS "${resolved}")
+  if("${base}" STREQUAL "depthai_ros_driver")
+    # Needed below: the pluginlib export must name the package that declares
+    # the BasePipeline base class, and that name carries the same suffix.
+    set(DEPTHAI_DRIVER_PKG "${resolved}")
   endif()
 endforeach()
 message(STATUS "oak_vio: using DepthAI packages: ${DEPTHAI_PKGS}")
+message(STATUS "oak_vio: pipeline plugins export to: ${DEPTHAI_DRIVER_PKG}")
 
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -77,7 +83,16 @@ target_include_directories(oak_vio_pipeline_plugin PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(oak_vio_pipeline_plugin PUBLIC oak_vio_core)
+# NOTE: plain signature, no PUBLIC keyword.
+#
+# ament_target_dependencies() calls target_link_libraries() internally using
+# the plain signature, and CMake refuses to mix plain and keyword forms on the
+# same target ("All uses of target_link_libraries with a target must be either
+# all-keyword or all-plain"). Since we use ament_target_dependencies below, this
+# call has to be plain too. It still propagates oak_vio_core's PUBLIC include
+# directories and its Eigen dependency -- the plain form is equivalent to
+# LINK_PUBLIC.
+target_link_libraries(oak_vio_pipeline_plugin oak_vio_core)
 ament_target_dependencies(oak_vio_pipeline_plugin
   ${DEPTHAI_PKGS}
   geometry_msgs
@@ -91,7 +106,11 @@ ament_target_dependencies(oak_vio_pipeline_plugin
   tf2_geometry_msgs
   tf2_ros
 )
-pluginlib_export_plugin_description_file(depthai_ros_driver plugins.xml)
+
+# Must name the package declaring BasePipeline, suffix and all, or pluginlib
+# will not find the plugin at runtime -- and it fails silently, as the driver
+# simply reports an unknown pipeline type.
+pluginlib_export_plugin_description_file(${DEPTHAI_DRIVER_PKG} plugins.xml)
 
 # ---------------------------------------------------------------------------
 # Tests. These exercise the core only -- no hardware, no ROS graph -- so they
@@ -120,6 +139,11 @@ install(TARGETS oak_vio_core oak_vio_pipeline_plugin
   RUNTIME DESTINATION bin
 )
 install(FILES plugins.xml DESTINATION share/${PROJECT_NAME})
+
+# Required by oakapp.toml's entrypoint, which runs
+#   ros2 launch oak_vio vio.launch.py
+# Without this the build succeeds and the app fails at start-up.
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
 ament_export_include_directories(include)
 ament_export_libraries(oak_vio_core oak_vio_pipeline_plugin)
