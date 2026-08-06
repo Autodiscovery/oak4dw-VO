@@ -363,6 +363,20 @@ def cmd_noise(args) -> int:
         print("  more textured scene.")
 
     # --- Plane-fit residual: model error, not noise ------------------------
+    #
+    # Gated on the same coverage threshold as the radial profile below. An earlier
+    # version gated only the profile, so this line still printed a confident
+    # 13.5 px at 4.2% coverage and 1.1 px at 0.1% -- numbers computed from a few
+    # hundred scattered pixels, presented as though they characterised the optics.
+    if validity < 0.40:
+        print(f"\n  SKIPPING the model-error analysis: {100.0 * validity:.1f}% valid coverage, and it needs a")
+        print("  flat surface actually filling the frame. Below ~40% the surviving pixels are")
+        print("  scattered fragments at assorted depths rather than a surface, and fitting a")
+        print("  plane to them produces confident-looking nonsense.")
+        print("  Re-run against brick, a large poster, or newspaper taped to a wall, at 3-5 m.")
+        print(f"\n  Set in params/vio.yaml:   vio.i_disparity_sigma_px: {sigma:.2f}")
+        return 0
+
     if residual_stds:
         plane = float(np.median(residual_stds))
         print(f"  PLANE-FIT residual:              {plane:.3f} px  (over {float(np.median(plane_disparities)):.1f} px disparity)")
@@ -391,13 +405,7 @@ def cmd_noise(args) -> int:
     core[y0:y1, x0:x1] = True
     core &= reference > 0.5
 
-    if validity < 0.40:
-        print(f"\n  SKIPPING the model-error analysis: only {100.0 * validity:.1f}% of pixels are valid, and it")
-        print("  needs a flat surface actually filling the frame. With coverage this sparse the")
-        print("  surviving pixels are scattered fragments at assorted depths, not a plane, and")
-        print("  fitting one to them produces confident-looking nonsense.")
-        print("  Re-run against a brick wall, a large poster, or newspaper taped to a wall.")
-    elif core.sum() > 500:
+    if core.sum() > 500:
         A = np.column_stack([xs[core], ys[core], np.ones(core.sum())])
         coeffs, *_ = np.linalg.lstsq(A, reference[core], rcond=None)
 

@@ -529,7 +529,25 @@ RANSAC is genuinely rejecting outliers. Keyframes are also now promoting on
 parallax rather than only hitting the age limit, so the promotion policy tuned in
 simulation is doing its intended job on hardware.
 
-### Frame rate is externally dictated: 10 Hz, not 30
+### Frame rate comes from the FSYNC master, not from this app
+
+**The camera is an FSYNC slave in a multi-camera rig, wired through the M8
+connector.** That is the whole explanation for the observed ~10 Hz: it is the rate
+the master was driving. Drive FSYNC at 30 Hz and the VO runs at 30 Hz, with no
+change to this app — `vio.i_set_sensor_fps` is already `false`, which is the
+correct setting for a slave, and `vio.i_fps` is inoperative by design.
+
+Everything below documents how that was diagnosed, and the API friction that made
+it slower than it should have been. Note that the earlier framing here and in the
+bug report — that the device was wrongly in slave mode with nothing attached — was
+an assumption on our side and was wrong.
+
+A useful side effect for later: in an FSYNC rig every camera exposes on the same
+pulse, so frames across the whole rig are hardware-synchronised. That is
+considerably better than software timestamp matching if this ever grows to
+multi-camera odometry.
+
+### How the rate was traced
 
 The VO runs at 10 Hz because **the camera does**, and that cannot be changed from
 software on this device. Setting the sensor FPS aborts the pipeline:
