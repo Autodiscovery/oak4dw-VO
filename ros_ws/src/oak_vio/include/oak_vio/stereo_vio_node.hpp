@@ -98,6 +98,10 @@ class StereoVioNode : public DriverBaseNode {
     std::atomic<unsigned> lastManipWidth_{0};
     std::atomic<unsigned> lastManipHeight_{0};
     std::atomic<std::size_t> lastManipBytes_{0};
+    /// Pixel statistics of the frame entering the tracker. A near-zero std
+    /// means it is being fed a blank image and the fault is upstream of it.
+    std::atomic<double> lastManipMean_{0.0};
+    std::atomic<double> lastManipStd_{0.0};
     std::atomic<std::size_t> lastFeatureCount_{0};
     /// Auto-exposure state. An exposure near the frame period means AE is what
     /// is capping the frame rate, and a dim frame is why there are no corners.

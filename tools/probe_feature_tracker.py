@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """Isolate why the RVC4 FeatureTracker reports zero corners.
 
-Runs from the HOST against the live device, so each variant takes seconds
-instead of a container rebuild. Every remaining hypothesis about the tracker is
-a flag here.
+Runs from the HOST against the live device, so each variant takes seconds rather
+than a container rebuild.
 
-The single most important run is the baseline, which is as close to the official
-Luxonis example as possible -- camera straight into the tracker, no stereo, no
-rectification:
+Two things learned the hard way, both encoded here:
 
-    python3 tools/probe_feature_tracker.py --device <ip>
+  * Camera.requestOutput(..., GRAY8, ...) is NOT honoured on this device -- it
+    returns NV12, and the FeatureTracker rejects NV12 outright with
+    "Unsupported colorspace format type: 22" and takes the device firmware down
+    with it. So every variant routes through an ImageManip to force GRAY8, and
+    each variant gets a fresh device connection with reconnect handling.
 
-If that yields zero features, the node is not working on this device and the
-problem is not in our pipeline at all. If it yields features, add variables one
-at a time until it breaks:
+  * The tracker throws loudly on a format it dislikes. It never threw on our
+    RAW8 or GRAY8 input, which means it was accepting those frames and finding
+    nothing in them. So the question is no longer format but CONTENT -- hence
+    the pixel statistics below. A blank rectifiedLeft would explain everything,
+    and would be consistent with depthai v3.3.0's changelog note about RVC4
+    rectified outputs.
 
-    python3 tools/probe_feature_tracker.py --device <ip> --source rectified
-    python3 tools/probe_feature_tracker.py --device <ip> --width 1280 --height 800
-    python3 tools/probe_feature_tracker.py --device <ip> --hw-resources 2
-    python3 tools/probe_feature_tracker.py --device <ip> --threshold 0.01
+    mean/std near zero  -> the image is blank; the tracker is right to find
+                           nothing and the fault is upstream of it
+    mean/std plausible  -> the image has content and the tracker is at fault
 
-Or sweep the interesting ones automatically:
-
+Usage:
     python3 tools/probe_feature_tracker.py --device <ip> --sweep
 """
 
@@ -30,6 +32,8 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+
+import numpy as np
 
 try:
     import depthai as dai
@@ -40,83 +44,119 @@ LEFT = dai.CameraBoardSocket.CAM_B
 RIGHT = dai.CameraBoardSocket.CAM_C
 
 
-def run_variant(device, *, source, width, height, fps, hw_resources, threshold,
-                num_target, use_manip, seconds, label):
-    """Build one pipeline variant and report the feature counts it produces."""
+def connect(ip: str | None, attempts: int = 4):
+    """Open the device, retrying -- a crashed device needs time to come back."""
+    for attempt in range(attempts):
+        try:
+            return dai.Device(dai.DeviceInfo(ip)) if ip else dai.Device()
+        except Exception as exc:  # noqa: BLE001
+            if attempt == attempts - 1:
+                raise
+            print(f"    (connect failed: {exc}; retrying in 5 s)")
+            time.sleep(5.0)
+    raise RuntimeError("unreachable")
+
+
+def stats(frame) -> tuple[float, float, int, int]:
+    """mean, std, min, max of a frame's pixels."""
+    try:
+        array = np.asarray(frame.getFrame())
+    except Exception:  # noqa: BLE001
+        buffer = np.frombuffer(bytes(frame.getData()), dtype=np.uint8)
+        array = buffer
+    if array.size == 0:
+        return 0.0, 0.0, 0, 0
+    return float(array.mean()), float(array.std()), int(array.min()), int(array.max())
+
+
+def run_variant(ip, *, source, width, height, fps, hw_resources, threshold,
+                num_target, seconds, label):
+    device = connect(ip)
     counts: list[int] = []
-    exposures: list[float] = []
+    frame_stats: list[tuple[float, float, int, int]] = []
+    tracker_input_type = -1
+    error = ""
 
-    with dai.Pipeline(device) as pipeline:
-        left = pipeline.create(dai.node.Camera).build(LEFT)
-        left_out = left.requestOutput(
-            (width, height),
-            dai.ImgFrame.Type.GRAY8 if not use_manip else None,
-            dai.ImgResizeMode.CROP,
-            fps,
-        )
+    try:
+        with dai.Pipeline(device) as pipeline:
+            left = pipeline.create(dai.node.Camera).build(LEFT)
+            # Do NOT ask for GRAY8 here: the request is ignored and NV12 comes
+            # back regardless. Take the native format and convert explicitly.
+            left_out = left.requestOutput((width, height), None, dai.ImgResizeMode.CROP, fps)
 
-        if source == "rectified":
-            # Full VO path: rectification, which is what our app actually feeds
-            # the tracker.
-            right = pipeline.create(dai.node.Camera).build(RIGHT)
-            right_out = right.requestOutput((width, height), dai.ImgFrame.Type.GRAY8,
-                                            dai.ImgResizeMode.CROP, fps)
-            stereo = pipeline.create(dai.node.StereoDepth)
-            stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DETAIL)
-            stereo.setRectification(True)
-            stereo.setLeftRightCheck(True)
-            stereo.setSubpixel(True)
-            left_out.link(stereo.left)
-            right_out.link(stereo.right)
-            tracker_source = stereo.rectifiedLeft
-        else:
-            tracker_source = left_out
+            if source == "rectified":
+                right = pipeline.create(dai.node.Camera).build(RIGHT)
+                right_out = right.requestOutput((width, height), None, dai.ImgResizeMode.CROP, fps)
+                stereo = pipeline.create(dai.node.StereoDepth)
+                stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DETAIL)
+                stereo.setRectification(True)
+                stereo.setLeftRightCheck(True)
+                stereo.setSubpixel(True)
+                left_out.link(stereo.left)
+                right_out.link(stereo.right)
+                tracker_source = stereo.rectifiedLeft
+            else:
+                tracker_source = left_out
 
-        tracker = pipeline.create(dai.node.FeatureTracker)
-        if threshold is not None:
-            # Explicit Harris threshold. The defaults are AUTO (0), meaning
-            # auto-adaptation -- which may simply not be implemented on RVC4.
-            corner = dai.FeatureTrackerConfig.CornerDetector()
-            corner.numTargetFeatures = num_target
-            corner.thresholds.initialValue = threshold
-            tracker.initialConfig.setCornerDetector(corner)
-        else:
-            tracker.initialConfig.setNumTargetFeatures(num_target)
-
-        if hw_resources is not None:
-            tracker.setHardwareResources(hw_resources, hw_resources)
-
-        if use_manip:
+            # Always force GRAY8, since the tracker will kill the firmware on NV12.
             manip = pipeline.create(dai.node.ImageManip)
             manip.initialConfig.setFrameType(dai.ImgFrame.Type.GRAY8)
-            manip.setMaxOutputFrameSize(width * height * 2)
+            manip.setMaxOutputFrameSize(width * height * 3)
             tracker_source.link(manip.inputImage)
+
+            tracker = pipeline.create(dai.node.FeatureTracker)
+            if threshold is not None:
+                corner = dai.FeatureTrackerConfig.CornerDetector()
+                corner.numTargetFeatures = num_target
+                corner.thresholds.initialValue = threshold
+                tracker.initialConfig.setCornerDetector(corner)
+            else:
+                tracker.initialConfig.setNumTargetFeatures(num_target)
+            if hw_resources is not None:
+                tracker.setHardwareResources(hw_resources, hw_resources)
             manip.out.link(tracker.inputImage)
-        else:
-            tracker_source.link(tracker.inputImage)
 
-        feature_queue = tracker.outputFeatures.createOutputQueue(4, False)
-        image_queue = left_out.createOutputQueue(1, False)
+            feature_queue = tracker.outputFeatures.createOutputQueue(4, False)
+            input_queue = manip.out.createOutputQueue(2, False)
 
-        pipeline.start()
-        deadline = time.time() + seconds
-        while time.time() < deadline and pipeline.isRunning():
-            features = feature_queue.tryGet()
-            if features is not None:
-                counts.append(len(features.trackedFeatures))
-            frame = image_queue.tryGet()
-            if frame is not None:
-                exposures.append(frame.getExposureTime().total_seconds() * 1000.0)
-            time.sleep(0.005)
+            pipeline.start()
+            deadline = time.time() + seconds
+            while time.time() < deadline and pipeline.isRunning():
+                features = feature_queue.tryGet()
+                if features is not None:
+                    counts.append(len(features.trackedFeatures))
+                frame = input_queue.tryGet()
+                if frame is not None:
+                    tracker_input_type = int(frame.getType())
+                    frame_stats.append(stats(frame))
+                time.sleep(0.005)
+    except Exception as exc:  # noqa: BLE001 - a failing variant is data
+        error = str(exc).splitlines()[0][:60]
+    finally:
+        try:
+            device.close()
+        except Exception:  # noqa: BLE001
+            pass
 
-    n = len(counts)
     best = max(counts) if counts else 0
-    mean = sum(counts) / n if n else 0.0
-    exposure = sum(exposures) / len(exposures) if exposures else float("nan")
-    verdict = "FEATURES" if best > 0 else "zero"
-    print(f"  {label:<52} {n:>4} msgs  mean {mean:>6.1f}  max {best:>4}  "
-          f"exp {exposure:>5.1f} ms   {verdict}")
-    return best > 0
+    mean_features = sum(counts) / len(counts) if counts else 0.0
+    if frame_stats:
+        mean_px = sum(s[0] for s in frame_stats) / len(frame_stats)
+        std_px = sum(s[1] for s in frame_stats) / len(frame_stats)
+        lo = min(s[2] for s in frame_stats)
+        hi = max(s[3] for s in frame_stats)
+        pixels = f"{mean_px:5.1f}+-{std_px:4.1f} [{lo:3d},{hi:3d}]"
+    else:
+        pixels = "     no frames     "
+
+    verdict = "FEATURES" if best > 0 else ("ERROR" if error else "zero")
+    print(f"  {label:<44} type={tracker_input_type:<3} px {pixels}  "
+          f"feat mean {mean_features:6.1f} max {best:<4} {verdict}")
+    if error:
+        print(f"      error: {error}")
+    # The device needs a moment between pipelines, especially after a crash.
+    time.sleep(2.0)
+    return best > 0, (frame_stats[0][1] if frame_stats else 0.0)
 
 
 def main() -> int:
@@ -127,78 +167,70 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=400)
     parser.add_argument("--fps", type=float, default=30.0)
-    parser.add_argument("--hw-resources", type=int, default=None,
-                        help="Call setHardwareResources(n, n). Omit to leave it unset.")
-    parser.add_argument("--threshold", type=float, default=None,
-                        help="Explicit Harris initial threshold. Omit for AUTO.")
+    parser.add_argument("--hw-resources", type=int, default=None)
+    parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument("--num-target", type=int, default=320)
-    parser.add_argument("--manip", action="store_true",
-                        help="Insert an ImageManip forcing GRAY8 before the tracker.")
     parser.add_argument("--seconds", type=float, default=6.0)
-    parser.add_argument("--sweep", action="store_true", help="Try the interesting combinations.")
+    parser.add_argument("--sweep", action="store_true")
     args = parser.parse_args()
 
-    device = dai.Device(dai.DeviceInfo(args.device)) if args.device else dai.Device()
-    print(f"Device: {device.getDeviceName()}  platform={device.getPlatformAsString()}")
     print("Point the camera at something textured and well lit.\n")
 
     if not args.sweep:
-        ok = run_variant(
-            device, source=args.source, width=args.width, height=args.height, fps=args.fps,
-            hw_resources=args.hw_resources, threshold=args.threshold,
-            num_target=args.num_target, use_manip=args.manip, seconds=args.seconds,
-            label=f"{args.source} {args.width}x{args.height}",
-        )
+        ok, _ = run_variant(args.device, source=args.source, width=args.width, height=args.height,
+                            fps=args.fps, hw_resources=args.hw_resources, threshold=args.threshold,
+                            num_target=args.num_target, seconds=args.seconds,
+                            label=f"{args.source} {args.width}x{args.height}")
         return 0 if ok else 1
 
-    # Ordered so the simplest configuration is first. The first row that
-    # produces features tells us what is sufficient; the first that stops
-    # producing them tells us what breaks it.
     variants = [
-        ("baseline: camera 640x400, all defaults",
-         dict(source="camera", width=640, height=400, hw_resources=None, threshold=None, use_manip=False)),
-        ("+ setHardwareResources(2,2)",
-         dict(source="camera", width=640, height=400, hw_resources=2, threshold=None, use_manip=False)),
-        ("+ setHardwareResources(1,1)",
-         dict(source="camera", width=640, height=400, hw_resources=1, threshold=None, use_manip=False)),
-        ("+ explicit Harris threshold 0.01",
-         dict(source="camera", width=640, height=400, hw_resources=None, threshold=0.01, use_manip=False)),
-        ("camera at 1280x800 (our app's resolution)",
-         dict(source="camera", width=1280, height=800, hw_resources=None, threshold=None, use_manip=False)),
-        ("camera 1280x720 (a documented tracker resolution)",
-         dict(source="camera", width=1280, height=720, hw_resources=None, threshold=None, use_manip=False)),
-        ("rectifiedLeft 640x400 (adds stereo)",
-         dict(source="rectified", width=640, height=400, hw_resources=None, threshold=None, use_manip=False)),
-        ("rectifiedLeft 640x400 + ImageManip GRAY8",
-         dict(source="rectified", width=640, height=400, hw_resources=None, threshold=None, use_manip=True)),
-        ("rectifiedLeft 1280x800 + manip (exactly our app)",
-         dict(source="rectified", width=1280, height=800, hw_resources=2, threshold=None, use_manip=True)),
+        ("camera 640x400, defaults",
+         dict(source="camera", width=640, height=400, hw_resources=None, threshold=None)),
+        ("camera 640x400 + hwResources(2,2)",
+         dict(source="camera", width=640, height=400, hw_resources=2, threshold=None)),
+        ("camera 640x400 + explicit threshold 0.01",
+         dict(source="camera", width=640, height=400, hw_resources=None, threshold=0.01)),
+        ("camera 1280x720",
+         dict(source="camera", width=1280, height=720, hw_resources=None, threshold=None)),
+        ("camera 1280x800 (our resolution)",
+         dict(source="camera", width=1280, height=800, hw_resources=None, threshold=None)),
+        ("rectifiedLeft 640x400",
+         dict(source="rectified", width=640, height=400, hw_resources=None, threshold=None)),
+        ("rectifiedLeft 1280x800 (our app)",
+         dict(source="rectified", width=1280, height=800, hw_resources=2, threshold=None)),
     ]
 
-    print(f"  {'variant':<52} {'msgs':>4}  {'mean':>11}  {'max':>4}  {'exposure':>8}")
-    print("  " + "-" * 92)
+    print(f"  {'variant':<44} {'type':<8} {'pixels mean+-std [min,max]':<21}  features")
+    print("  " + "-" * 104)
     results = []
     for label, kwargs in variants:
-        try:
-            results.append((label, run_variant(device, fps=args.fps, num_target=args.num_target,
-                                               seconds=args.seconds, label=label, **kwargs)))
-        except Exception as exc:  # noqa: BLE001 - a failing variant is data, keep going
-            print(f"  {label:<52} FAILED: {exc}")
-            results.append((label, False))
+        ok, std = run_variant(args.device, fps=args.fps, num_target=args.num_target,
+                              seconds=args.seconds, label=label, **kwargs)
+        results.append((label, ok, std))
 
-    working = [label for label, ok in results if ok]
+    working = [label for label, ok, _ in results if ok]
+    blank = [label for label, _, std in results if std < 1.0]
+
     print()
-    if not working:
-        print("No variant produced a single feature, including the near-official baseline.")
-        print("That points at the FeatureTracker node on this device/firmware rather than")
-        print("at our pipeline. Worth raising with Luxonis, quoting Luxonis OS and depthai")
-        print("versions. Meanwhile the front-end would need to change -- the estimator")
-        print("itself only needs (id, u, v, disparity) tuples from somewhere.")
-    else:
+    if working:
         print("Variants that produced features:")
         for label in working:
             print(f"  - {label}")
         print("\nThe first failing row after a working one identifies the culprit.")
+    elif blank and len(blank) == len(results):
+        print("No variant produced features AND every frame was essentially blank")
+        print("(std < 1 grey level). The tracker is not the problem -- it is being fed")
+        print("empty images. Look at whether the ImageManip conversion is actually")
+        print("producing pixels on this platform.")
+    else:
+        print("No variant produced a single feature, and the frames were NOT blank --")
+        print("the tracker is receiving real images and detecting nothing in them.")
+        print("That points at the FeatureTracker on this device/firmware rather than at")
+        print("our pipeline. Worth raising with Luxonis, quoting Luxonis OS and depthai")
+        print("versions and the 'Unsupported colorspace format type: 22' firmware crash.")
+        print("\nThe estimator is unaffected either way: it consumes (id, u, v, disparity)")
+        print("tuples, so swapping in a CPU Harris + Lucas-Kanade front-end is contained")
+        print("to one file.")
     return 0
 
 

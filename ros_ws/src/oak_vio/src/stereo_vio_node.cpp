@@ -264,7 +264,31 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
             lastManipType_ = static_cast<int>(frame->getType());
             lastManipWidth_ = frame->getWidth();
             lastManipHeight_ = frame->getHeight();
-            lastManipBytes_ = frame->getData().size();
+
+            // Pixel statistics, because the tracker throws loudly on a format
+            // it dislikes and never threw on ours -- so it is accepting these
+            // frames and finding nothing in them. That makes CONTENT the open
+            // question, not format. A near-zero std means the image is blank and
+            // the tracker is right to find no corners.
+            //
+            // Note getData().size() is the buffer capacity, not the image size,
+            // so bound the scan by width*height rather than trusting it.
+            const auto& data = frame->getData();
+            const std::size_t pixels = std::min(static_cast<std::size_t>(frame->getWidth()) * frame->getHeight(), data.size());
+            double sum = 0.0;
+            double sumSquares = 0.0;
+            std::size_t sampled = 0;
+            for(std::size_t i = 0; i < pixels; i += 16) {
+                const double value = static_cast<double>(data[i]);
+                sum += value;
+                sumSquares += value * value;
+                ++sampled;
+            }
+            if(sampled > 0) {
+                const double mean = sum / static_cast<double>(sampled);
+                lastManipMean_ = mean;
+                lastManipStd_ = std::sqrt(std::max(0.0, sumSquares / static_cast<double>(sampled) - mean * mean));
+            }
         }
     });
 
@@ -497,12 +521,15 @@ void StereoVioNode::onFrame(const std::shared_ptr<dai::MessageGroup>& group) {
         RCLCPP_WARN_THROTTLE(getLogger(),
                              *getROSNode()->get_clock(),
                              3000,
-                             "  tracker input (after ImageManip): %ux%u type=%d bytes=%zu (GRAY8 is type=%d)",
+                             "  tracker input (after ImageManip): %ux%u type=%d (GRAY8 is type=%d), "
+                             "pixels mean=%.1f std=%.1f -- a std below ~2 grey levels means the frame is "
+                             "blank and the tracker is right to find nothing",
                              lastManipWidth_.load(),
                              lastManipHeight_.load(),
                              lastManipType_.load(),
-                             lastManipBytes_.load(),
-                             static_cast<int>(dai::ImgFrame::Type::GRAY8));
+                             static_cast<int>(dai::ImgFrame::Type::GRAY8),
+                             lastManipMean_.load(),
+                             lastManipStd_.load());
     }
 
     // Per-stage rates. This is what localises the bottleneck: compare the
