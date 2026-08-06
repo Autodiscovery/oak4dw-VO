@@ -547,6 +547,32 @@ pulse, so frames across the whole rig are hardware-synchronised. That is
 considerably better than software timestamp matching if this ever grows to
 multi-camera odometry.
 
+#### Making this camera the master
+
+Master and slave are decided by **cabling, not software**. The device with nothing
+plugged into its M8 **IN** port outputs its internal FSYNC signal and becomes the
+master; anything with a cable in **IN** is a slave. The OAK 4 D can be either —
+older OAK PoE models can only ever be slaves. Up to 3 devices per chain before
+cumulative internal resistance starts degrading the signal.
+
+So there are two routes to 30 Hz:
+
+1. **Leave this camera a slave** and set the existing master to 30 Hz. Nothing
+   changes here.
+2. **Make this camera the master** — unplug its `IN`, drive the others from its
+   `OUT` — then set `vio.i_set_sensor_fps: true` and `vio.i_fps: 30`. It then
+   defines the rate for the whole rig, and the OV9282 pair will go to 60 if you
+   want it.
+
+Route 2 is worth considering if the VO is the timing-critical consumer in the rig,
+since it puts the rate under this app's control. Route 1 is right if something
+else should govern rig timing.
+
+There is no software way to force mastership, which is also why the app cannot
+detect it: if `i_set_sensor_fps` is set true on a slaved camera, the pipeline
+aborts inside the driver's start where we cannot intercept it. Startup now logs a
+warning naming that failure mode before it can happen.
+
 ### How the rate was traced
 
 The VO runs at 10 Hz because **the camera does**, and that cannot be changed from

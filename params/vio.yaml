@@ -48,10 +48,19 @@
       # and a slave must not try to override it -- attempting to aborts the
       # pipeline with "Cannot override fps while using external FSYNC slave mode".
       #
-      # So i_fps above is NOT the rate you get; the master decides. To run the VO
-      # at 30 Hz, drive FSYNC at 30 Hz. Nothing here needs to change for that.
+      # So i_fps above is NOT the rate you get; the master decides.
       #
-      # Set true only on a camera that owns its own timing.
+      # Master versus slave is decided by CABLING, not by software. The device with
+      # nothing plugged into its M8 "IN" port outputs its internal FSYNC signal and
+      # becomes the master; anything with a cable in "IN" is a slave. OAK 4 D can
+      # be either (older OAK PoE models can only ever be slaves). Up to 3 devices
+      # per chain before cumulative resistance degrades the signal.
+      #
+      # Two ways to get 30 Hz:
+      #   1. Leave this false and set the existing master to 30 Hz.
+      #   2. Make THIS camera the master -- unplug its "IN", drive the others from
+      #      its "OUT" -- then set this true and i_fps to 30. It then defines the
+      #      rate for the whole rig.
       i_set_sensor_fps: false
 
       # MUST match StereoDepth's subpixel configuration. 5 bits = 1/32 px.

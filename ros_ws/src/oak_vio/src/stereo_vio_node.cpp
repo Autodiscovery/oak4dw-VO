@@ -320,6 +320,13 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
 
     if(setSensorFps) {
         RCLCPP_INFO(getLogger(), "VO pipeline: %dx%d from %dx%d sensor @ %.1f FPS requested, sync window %d ms, CPU feature tracking", width_, height_, sensorWidth_, sensorHeight_, fps_, syncWindowMs);
+        // Pre-warn, because the failure lands inside the driver's pipeline start
+        // where we cannot catch it and the message alone is easy to misread.
+        RCLCPP_INFO(getLogger(),
+                    "Setting the sensor rate, which requires this camera to own its timing. If it is "
+                    "an FSYNC slave -- anything plugged into its M8 IN port -- pipeline start will abort "
+                    "with \"Cannot override fps while using external FSYNC slave mode\". In that case set "
+                    "vio.i_set_sensor_fps to false and let the FSYNC master set the rate.");
     } else {
         RCLCPP_WARN(getLogger(),
                     "VO pipeline: %dx%d from %dx%d sensor, sync window %d ms, CPU feature tracking. Sensor FPS is "
