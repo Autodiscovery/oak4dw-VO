@@ -164,9 +164,13 @@ void StereoVioNode::setInOut(std::shared_ptr<dai::Pipeline> pipeline) {
     leftCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_B);
     rightCamera_ = pipeline->create<dai::node::Camera>()->build(dai::CameraBoardSocket::CAM_C);
 
+    // GRAY8, not NV12. The stereo pair is a mono OV9282; asking for a colour
+    // format forces a needless conversion and gives the stereo block an input
+    // it does not want. This was producing frames at the right rate with no
+    // usable disparity in them -- everything looked alive while nothing worked.
     const auto requested = std::make_pair(width_, height_);
-    auto* leftOutput = leftCamera_->requestOutput(requested, dai::ImgFrame::Type::NV12, dai::ImgResizeMode::CROP, static_cast<float>(fps_));
-    auto* rightOutput = rightCamera_->requestOutput(requested, dai::ImgFrame::Type::NV12, dai::ImgResizeMode::CROP, static_cast<float>(fps_));
+    auto* leftOutput = leftCamera_->requestOutput(requested, dai::ImgFrame::Type::GRAY8, dai::ImgResizeMode::CROP, static_cast<float>(fps_));
+    auto* rightOutput = rightCamera_->requestOutput(requested, dai::ImgFrame::Type::GRAY8, dai::ImgResizeMode::CROP, static_cast<float>(fps_));
 
     // ---- Stereo ----------------------------------------------------------
     stereo_ = pipeline->create<dai::node::StereoDepth>();
@@ -351,6 +355,40 @@ void StereoVioNode::onFrame(const std::shared_ptr<dai::MessageGroup>& group) {
             continue;  // no stereo support at this pixel
         }
         observations.push_back(observation);
+    }
+
+    // Empty observations are the one failure the status topic cannot explain on
+    // its own: num_observations is counted *after* the disparity filter, so a
+    // silent feature tracker and a dead stereo block look identical. Only pay
+    // for this diagnostic when something is actually wrong.
+    if(observations.empty()) {
+        const auto& data = disparityFrame->getData();
+        const auto* raw = reinterpret_cast<const std::uint16_t*>(data.data());
+        const std::size_t pixels = data.size() / sizeof(std::uint16_t);
+        std::size_t sampled = 0;
+        std::size_t nonZero = 0;
+        for(std::size_t i = 0; i < pixels; i += 16) {
+            ++sampled;
+            if(raw[i] != 0) {
+                ++nonZero;
+            }
+        }
+        const std::size_t expectedBytes = static_cast<std::size_t>(disparityFrame->getWidth()) * disparityFrame->getHeight() * sizeof(std::uint16_t);
+        RCLCPP_WARN_THROTTLE(getLogger(),
+                             *getROSNode()->get_clock(),
+                             3000,
+                             "VO produced no usable observations. tracker features=%zu | disparity %ux%u "
+                             "type=%d bytes=%zu (expected %zu for RAW16) nonzero=%.1f%%. "
+                             "features>0 with nonzero~0%% means the stereo block is not producing disparity; "
+                             "features==0 means the feature tracker is not producing corners; "
+                             "bytes!=expected means the frame is not RAW16 and the disparity decode is wrong.",
+                             features->trackedFeatures.size(),
+                             disparityFrame->getWidth(),
+                             disparityFrame->getHeight(),
+                             static_cast<int>(disparityFrame->getType()),
+                             data.size(),
+                             expectedBytes,
+                             100.0 * static_cast<double>(nonZero) / static_cast<double>(std::max<std::size_t>(sampled, 1)));
     }
 
     const auto deviceStamp = disparityFrame->getTimestamp();

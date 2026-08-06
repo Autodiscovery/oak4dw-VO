@@ -173,7 +173,19 @@ def main() -> int:
     print(f"     net displacement {displacement * 100:.1f} cm, path length {path * 100:.1f} cm")
     print(f"     final position  x={end_p[0]:+.3f}  y={end_p[1]:+.3f}  z={end_p[2]:+.3f}  (m)")
 
-    if args.stationary:
+    # A pose that never moves is only meaningful if the estimator was actually
+    # tracking. If it never left INITIALISING, "zero drift" is vacuous -- the
+    # pose is pinned at the origin because nothing is being solved. Report that
+    # honestly instead of banking a free pass.
+    ever_tracked = True
+    if HAVE_STATUS_MSGS and node.status:
+        ever_tracked = any(m.state in (1, 2) for m in node.status)
+
+    if not ever_tracked:
+        check(None, "motion checks skipped",
+              "the estimator never reached TRACKING, so pose is pinned at the origin "
+              "and drift figures are meaningless")
+    elif args.stationary:
         check(displacement < args.max_static_drift,
               f"stationary drift under {args.max_static_drift * 100:.0f} cm",
               f"{displacement * 100:.2f} cm over {wall:.0f} s")
@@ -207,9 +219,16 @@ def main() -> int:
         obs = [m.num_observations for m in node.status]
         corr = [m.num_correspondences for m in node.status]
         sel = [m.num_selected for m in node.status]
-        check(None, "feature funnel (observed -> matched -> bucketed -> inlier)",
-              f"{statistics.median(obs):.0f} -> {statistics.median(corr):.0f} -> "
-              f"{statistics.median(sel):.0f} -> {statistics.median(inliers):.0f}")
+        check(statistics.median(obs) > 0,
+              "features arrive with valid disparity",
+              f"funnel: {statistics.median(obs):.0f} -> {statistics.median(corr):.0f} -> "
+              f"{statistics.median(sel):.0f} -> {statistics.median(inliers):.0f} "
+              f"(observed -> matched -> bucketed -> inlier)")
+        if statistics.median(obs) == 0:
+            print("         Zero observations means either the feature tracker produced no")
+            print("         corners, or every disparity lookup failed. The app log prints a")
+            print("         throttled diagnostic that distinguishes the two -- check it with")
+            print("         'oakctl app logs <app-id>'.")
 
         solve = sorted(m.solve_ms for m in node.status)
         p95 = solve[int(0.95 * (len(solve) - 1))]
