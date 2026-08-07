@@ -181,7 +181,13 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle, wi
     print(f"  frames to tracker:    {frames_seen}"
           + (f", first at {first_frame_at:.2f} s" if first_frame_at is not None else ""))
 
-    if not feature_counts:
+    if not with_tracker:
+        # No tracker in this pipeline, so "zero features" is the definition, not a
+        # finding. What matters from a control run is whether the device survived
+        # and how good the input was.
+        print(f"  RESULT: control ran {frames_seen} frames"
+              + (f" -- {error}" if error else " -- device stayed up"))
+    elif not feature_counts:
         print("  RESULT: ZERO TrackedFeatures messages", end="")
     elif max(feature_counts) == 0:
         print(f"  RESULT: {len(feature_counts)} messages, all EMPTY", end="")
@@ -189,7 +195,8 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle, wi
         print(f"  RESULT: {len(feature_counts)} messages, features per message: "
               f"min {min(feature_counts)}, median {int(np.median(feature_counts))}, "
               f"max {max(feature_counts)}", end="")
-    print(f" -- {error}" if error else "")
+    if with_tracker:
+        print(f" -- {error}" if error else "")
 
     # Only blame the scene when the scene is actually what was seen. A crash
     # before any frame arrived says nothing about lighting, and an earlier version

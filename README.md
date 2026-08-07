@@ -619,10 +619,26 @@ scale.
 
 ## Blocker: the RVC4 hardware feature tracker does not work
 
-**Status as of 2026-08-06: `dai::node::FeatureTracker` is non-functional on this
-OAK-4-D-W firmware.** It returns zero features for every configuration tried,
-throws `DS: Assert (hSession != NULL)` — it is failing to acquire its hardware
-session — and takes the device firmware down with it.
+**Status: `dai::node::FeatureTracker` crashes the firmware on this OAK-4-D-W,
+confirmed against a control.** On an otherwise byte-for-byte identical pipeline,
+removing that one node makes the device stable; adding it back crashes the firmware
+after a single frame:
+
+| Socket | With `FeatureTracker` | Control: no tracker |
+|---|---|---|
+| CAM_B | 1 frame, **crash at 2.2 s** | **104 frames, no crash**, input mean 86.6 std 70.4 |
+| CAM_C | 1 frame, **crash at 2.3 s** | **104 frames, no crash**, input mean 86.8 std 69.4 |
+
+The control is what makes this evidence rather than correlation — and it also
+settles a question that dogged the whole investigation, by proving the input was
+always good. Mean ~87, std ~70 over the full range: well-exposed and well-textured,
+delivered as GRAY8 through the supported `Camera (NV12) → ImageManip (GRAY8) →
+FeatureTracker` path. Every dark-frame reading earlier was a *consequence* of the
+crash, not a cause of the zero-feature result.
+
+Also found: **CAM_A fails independently of the tracker**, crashing with and without
+it via `CameraSensor.cpp:188`. That is a separate defect which the tracker problem
+had been masking, and it is reported separately.
 
 This was established by measurement, not inference. `tools/probe_feature_tracker.py`
 sweeps camera-direct and rectified sources across 640×400, 1280×720 and

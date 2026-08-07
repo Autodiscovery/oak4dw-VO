@@ -1,4 +1,53 @@
-# Bug report: FeatureTracker non-functional on RVC4 (OAK-4-D-W)
+# Bug report: FeatureTracker crashes RVC4 firmware within ~2 seconds
+
+**Headline, with a control:** on an otherwise byte-for-byte identical pipeline,
+removing the `FeatureTracker` node makes the device stable. Adding it back crashes
+the firmware after a single frame. Reproducible on both mono sockets.
+
+| Socket | With `FeatureTracker` | Control: same pipeline, no tracker |
+|---|---|---|
+| CAM_B | 1 frame at 0.24 s, **firmware crash at 2.2 s**, zero `TrackedFeatures` | **104 frames, no crash**, input mean 86.6 std 70.4 |
+| CAM_C | 1 frame at 0.24 s, **firmware crash at 2.3 s**, zero `TrackedFeatures` | **104 frames, no crash**, input mean 86.8 std 69.4 |
+| CAM_A | crash | **also crashes** — see Issue 2, unrelated to the tracker |
+
+The control run doubles as proof the input is good: mean ~87 with std ~70 over the
+full 0–255 range is a well-exposed, well-textured frame, delivered as GRAY8
+(type 30) through the supported conversion path. So the tracker is being handed
+valid frames and takes the device down rather than returning corners.
+
+Pipeline is exactly the advised path, with nothing else in it:
+
+    Camera (NV12) -> ImageManip (GRAY8) -> FeatureTracker
+
+Reproduce with `tools/repro_feature_tracker_minimal.py --device <ip>`, which runs
+both arms of the comparison and prints the verdict.
+
+**depthai 3.8.0, Luxonis OS RVC4 1.37.0, OAK-4-D-W, device 3549741690.**
+
+---
+
+## Issue 2 — CAM_A fails independently of the tracker
+
+CAM_A crashes with *and* without the `FeatureTracker`, so it is a separate fault
+that happens to have been masked by the one above:
+
+```
+[Camera(0)] [error] Exception in send_frame(): Internal error occured. Please report.
+                    commit:  | version: 0.0.1 | file: /work/src/camera/CameraSensor.cpp:188
+```
+
+Repeated many times per second, then a firmware crash. No frame ever reaches the
+rest of the pipeline. One run instead produced
+`RPC 'startPipeline' failed: Signal not present on input.`, which reads like a
+missing sync signal — this device is FSYNC-slaved in a multi-camera rig, so that
+may be relevant.
+
+This is a camera-sensor level error with no feature tracking involved and probably
+deserves its own issue.
+
+---
+
+## Original report, retained for detail
 
 Ready to file at <https://github.com/luxonis/depthai-core/issues>. Complete — no
 placeholders remaining.
