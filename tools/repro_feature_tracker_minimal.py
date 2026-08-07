@@ -58,7 +58,7 @@ def connect(ip: str | None, attempts: int = 4):
     raise RuntimeError("unreachable")
 
 
-def run(ip, socket_name, socket, size, fps, seconds, target_features):
+def run(ip, socket_name, socket, size, fps, seconds, target_features, settle):
     print(f"\n--- {socket_name} at {size[0]}x{size[1]} ---")
     device = connect(ip)
 
@@ -92,6 +92,15 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features):
             tracker_input_q = manip.out.createOutputQueue(4, False)
 
             pipeline.start()
+
+            # Let 3A settle before believing any pixel statistics. Without this the
+            # first frames are near-black and the brightness verdict is meaningless.
+            settle_until = time.time() + settle
+            while time.time() < settle_until and pipeline.isRunning():
+                features_q.tryGet()
+                tracker_input_q.tryGet()
+                time.sleep(0.01)
+
             deadline = time.time() + seconds
             while time.time() < deadline and pipeline.isRunning():
                 msg = features_q.tryGet()
@@ -105,6 +114,9 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features):
                         pixel_stats = (float(array.mean()), float(array.std()),
                                        int(array.min()), int(array.max()))
                 time.sleep(0.005)
+
+            if not pipeline.isRunning():
+                error = error or "pipeline stopped early (device crash)"
     except Exception as exc:  # noqa: BLE001 - the failure IS the result
         error = str(exc).splitlines()[0]
     finally:
@@ -118,18 +130,37 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features):
           + ("  <-- correct" if frame_type == gray8 else "  <-- NOT GRAY8"))
     if pixel_stats:
         mean, std, lo, hi = pixel_stats
-        print(f"  tracker input pixels: mean {mean:.1f}, std {std:.1f}, range [{lo}, {hi}]"
-              + ("  <-- looks blank" if std < 2.0 else "  <-- has real content"))
+        # Judge on the MEAN as well as the spread. An earlier version gated on std
+        # alone and called mean 0.1 / std 2.2 "real content" -- that is a black
+        # frame with a handful of hot pixels, and a tracker is right to find
+        # nothing in it.
+        if mean < 5.0:
+            verdict = "  <-- ESSENTIALLY BLACK, no corners to find"
+        elif std < 5.0:
+            verdict = "  <-- flat, very little texture"
+        else:
+            verdict = "  <-- has real content"
+        print(f"  tracker input pixels: mean {mean:.1f}, std {std:.1f}, range [{lo}, {hi}]{verdict}")
+        usable_input = mean >= 5.0 and std >= 5.0
     else:
         print("  tracker input pixels: no frame captured")
+        usable_input = False
 
-    if error:
-        print(f"  RESULT: exception -- {error}")
+    if error and not feature_counts:
+        print(f"  RESULT: no TrackedFeatures messages -- {error}")
+    elif error:
+        print(f"  RESULT: {len(feature_counts)} messages before failing -- {error}")
     elif not feature_counts:
-        print("  RESULT: no TrackedFeatures messages at all")
+        print("  RESULT: pipeline ran, but no TrackedFeatures messages were produced at all")
+    elif max(feature_counts) == 0:
+        print(f"  RESULT: {len(feature_counts)} messages, all EMPTY (zero features in every one)")
     else:
         print(f"  RESULT: {len(feature_counts)} messages, features per message: "
               f"min {min(feature_counts)}, median {int(np.median(feature_counts))}, max {max(feature_counts)}")
+
+    if not usable_input and not error:
+        print("  NOTE: the input was not usable, so a zero-feature result says nothing about")
+        print("        the tracker. Improve the lighting or the scene and re-run.")
 
     time.sleep(2.0)
     return bool(feature_counts) and max(feature_counts) > 0, error
@@ -144,6 +175,8 @@ def main() -> int:
     parser.add_argument("--height", type=int, default=400)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--seconds", type=float, default=6.0)
+    parser.add_argument("--settle", type=float, default=3.0,
+                        help="Seconds to let auto-exposure settle before measuring.")
     parser.add_argument("--target-features", type=int, default=320)
     args = parser.parse_args()
 
@@ -167,7 +200,7 @@ def main() -> int:
     for name in names:
         results[name] = run(args.device, name, SOCKETS[name],
                             (args.width, args.height), args.fps, args.seconds,
-                            args.target_features)
+                            args.target_features, args.settle)
 
     working = [n for n, (ok, _) in results.items() if ok]
     print("\n" + "=" * 72)

@@ -5,7 +5,48 @@ placeholders remaining.
 
 ---
 
-## Status: awaiting a re-test on the supported path after a device update
+## Re-test on the supported path — still fails, and the device crashes
+
+Re-tested with a purpose-built minimal reproducer
+(`tools/repro_feature_tracker_minimal.py`) on exactly the advised path:
+`Camera (NV12) → ImageManip (GRAY8) → FeatureTracker`. One camera, one manip, one
+tracker, no stereo, no other nodes.
+
+**depthai 3.8.0, Luxonis OS RVC4 1.37.0, OAK-4-D-W, device 3549741690.**
+
+| Socket | Tracker input | Result |
+|---|---|---|
+| CAM_A | no frame reached the tracker | Camera-level failure, then firmware crash |
+| CAM_B | type 30 (GRAY8) confirmed | **No TrackedFeatures messages at all**, firmware crash |
+| CAM_C | type 30 (GRAY8) confirmed | **No TrackedFeatures messages at all**, firmware crash |
+
+Every socket crashed the firmware and produced a crash dump.
+
+CAM_A failed differently and earlier, before the tracker was involved at all:
+
+```
+[Camera(0)] [error] Exception in send_frame(): Internal error occured. Please report.
+                    commit:  | version: 0.0.1 | file: /work/src/camera/CameraSensor.cpp:188
+```
+
+That is a camera-sensor internal error, not a tracker one, and may be a separate
+issue worth its own attention.
+
+Note this run is *more* severe than the earlier sweeps: previously the tracker
+emitted messages that were empty, whereas here no `TrackedFeatures` message was
+produced at all before the device went down.
+
+One caveat on our side: the mono frames in this particular run were very dark
+(mean 0.6 and 0.1 of 255) because the reproducer had no auto-exposure settle
+period, so the pixel content is not itself evidence. That has been fixed — the
+tool now settles 3A before measuring and judges brightness on the mean rather than
+the spread alone. The earlier sweeps, which did have well-exposed input
+(**mean 60.7, std 58.0**), produced the same zero-feature outcome, so the darkness
+here is not the explanation.
+
+### Earlier finding, unchanged
+
+## Status of the original report
 
 Luxonis advise that FeatureTracker does work on RVC4, that a Camera output must
 not be linked to it directly, and that the supported path is:
