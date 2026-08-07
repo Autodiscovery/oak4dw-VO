@@ -5,6 +5,31 @@ placeholders remaining.
 
 ---
 
+## Status: awaiting a re-test on the supported path after a device update
+
+Luxonis advise that FeatureTracker does work on RVC4, that a Camera output must
+not be linked to it directly, and that the supported path is:
+
+    Camera (NV12) -> ImageManip (GRAY8) -> FeatureTracker
+
+**Every variant reported below already used that path.** `tools/probe_feature_tracker.py`
+inserts an `ImageManip` converting to GRAY8 in all cases, and the tables record the
+frame type arriving at the tracker as 30 (GRAY8) with non-blank pixel statistics.
+The direct-link NV12 case is documented separately as Issue 2 precisely because it
+is not the path we were relying on.
+
+That said, two things are worth doing before pressing this:
+
+1. **Update the device** and re-test — the advice mentions updating, and these
+   results are from Luxonis OS 1.37.0.
+2. **Re-test with a purpose-built minimal reproducer** rather than a sweep
+   harness, to remove any doubt that the surrounding tooling contributes.
+   `tools/repro_feature_tracker_minimal.py` is that: one camera, one manip, one
+   tracker, no stereo, and it sweeps CAM_A / CAM_B / CAM_C since a per-socket
+   difference would narrow the problem considerably.
+
+If features appear after either, this report should be withdrawn or rewritten.
+
 ## Summary
 
 `dai::node::FeatureTracker` returns zero features for every configuration tried
