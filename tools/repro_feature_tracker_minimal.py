@@ -58,9 +58,11 @@ def connect(ip: str | None, attempts: int = 4):
     raise RuntimeError("unreachable")
 
 
-def run(ip, socket_name, socket, size, fps, seconds, target_features, settle, with_tracker=True):
-    label = "WITH FeatureTracker" if with_tracker else "CONTROL: no FeatureTracker"
-    print(f"\n--- {socket_name} at {size[0]}x{size[1]}, {label} ---")
+def run(ip, socket_name, socket, size, fps, seconds, target_features, settle,
+        with_tracker=True, use_manip=True, resize_mode=None, label=None):
+    if label is None:
+        label = "WITH FeatureTracker" if with_tracker else "CONTROL: no FeatureTracker"
+    print(f"\n--- {socket_name} {size[0]}x{size[1]}: {label} ---")
     device = connect(ip)
 
     feature_counts: list[int] = []
@@ -73,19 +75,33 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle, wi
 
     try:
         with dai.Pipeline(device) as pipeline:
-            # 1. Camera, NV12 -- the format the sensor actually delivers.
+            # 1. Camera. NV12 when a manip will convert it, GRAY8 when the
+            #    tracker is fed directly -- the two candidate paths.
             cam = pipeline.create(dai.node.Camera).build(socket)
-            cam_out = cam.requestOutput(size, dai.ImgFrame.Type.NV12, fps=fps)
+            requested_type = dai.ImgFrame.Type.NV12 if use_manip else dai.ImgFrame.Type.GRAY8
 
-            # 2. ImageManip, NV12 -> GRAY8. This is the conversion step the
-            #    maintained example uses and the tracker requires.
-            manip = pipeline.create(dai.node.ImageManip)
-            manip.initialConfig.setFrameType(dai.ImgFrame.Type.GRAY8)
-            # Generously sized: the manip pads to hardware alignment, and an exact
-            # width*height budget makes it skip every frame at sizes whose height
-            # is not a multiple of 32.
-            manip.setMaxOutputFrameSize(size[0] * size[1] * 3)
-            cam_out.link(manip.inputImage)
+            # Pass only the arguments this variant is testing. Supplying
+            # resizeMode or fps when the working example omits them is exactly the
+            # kind of difference that could matter, so do not add them silently.
+            kwargs = {}
+            if resize_mode is not None:
+                kwargs["resizeMode"] = resize_mode
+            if fps is not None:
+                kwargs["fps"] = fps
+            cam_out = cam.requestOutput(size, type=requested_type, **kwargs)
+
+            # 2. ImageManip, NV12 -> GRAY8, only on the manip path.
+            if use_manip:
+                manip = pipeline.create(dai.node.ImageManip)
+                manip.initialConfig.setFrameType(dai.ImgFrame.Type.GRAY8)
+                # Generously sized: the manip pads to hardware alignment, and an
+                # exact width*height budget makes it skip every frame at sizes
+                # whose height is not a multiple of 32.
+                manip.setMaxOutputFrameSize(size[0] * size[1] * 3)
+                cam_out.link(manip.inputImage)
+                tracker_source = manip.out
+            else:
+                tracker_source = cam_out
 
             # 3. FeatureTracker -- omitted in the control run, which is otherwise
             #    byte-for-byte identical. If the device survives without it and
@@ -95,10 +111,10 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle, wi
             if with_tracker:
                 tracker = pipeline.create(dai.node.FeatureTracker)
                 tracker.initialConfig.setNumTargetFeatures(target_features)
-                manip.out.link(tracker.inputImage)
+                tracker_source.link(tracker.inputImage)
                 features_q = tracker.outputFeatures.createOutputQueue(8, False)
 
-            tracker_input_q = manip.out.createOutputQueue(4, False)
+            tracker_input_q = tracker_source.createOutputQueue(4, False)
 
             pipeline.start()
             started = time.time()
@@ -225,6 +241,10 @@ def main() -> int:
     parser.add_argument("--settle", type=float, default=3.0,
                         help="Seconds to let auto-exposure settle before measuring.")
     parser.add_argument("--target-features", type=int, default=320)
+    parser.add_argument("--direct", action="store_true",
+                        help="Link Camera GRAY8 straight to the tracker, no ImageManip.")
+    parser.add_argument("--matrix", action="store_true",
+                        help="Isolate what differs between the known-working configuration and the failing one, changing one variable at a time.")
     parser.add_argument("--skip-control", action="store_true",
                         help="Skip the no-FeatureTracker control run (halves the runtime, but the control is what makes the result evidence rather than correlation).")
     args = parser.parse_args()
@@ -244,17 +264,64 @@ def main() -> int:
     print("\nPoint the camera at something textured and well lit -- a bookshelf, a desk,")
     print("anything visually busy. A blank wall legitimately has no corners to find.")
 
+    if args.matrix:
+        # A working configuration exists: Camera GRAY8 linked STRAIGHT to the
+        # tracker, 640x480, with neither resizeMode nor fps passed. That differs
+        # from the failing configuration in three ways at once, so change one
+        # thing at a time to find which one matters.
+        socket_name = args.socket or "CAM_B"
+        socket = SOCKETS[socket_name]
+        matrix = [
+            ("known-good: direct GRAY8, 640x480, no resizeMode, no fps",
+             dict(size=(640, 480), use_manip=False, resize_mode=None, fps=None)),
+            ("+ fps=30",
+             dict(size=(640, 480), use_manip=False, resize_mode=None, fps=args.fps)),
+            ("+ resizeMode=CROP",
+             dict(size=(640, 480), use_manip=False, resize_mode=dai.ImgResizeMode.CROP, fps=None)),
+            ("640x400 instead of 640x480",
+             dict(size=(640, 400), use_manip=False, resize_mode=None, fps=None)),
+            ("via ImageManip (the advised path)",
+             dict(size=(640, 480), use_manip=True, resize_mode=None, fps=None)),
+            ("everything the failing config had",
+             dict(size=(640, 400), use_manip=True, resize_mode=dai.ImgResizeMode.CROP, fps=args.fps)),
+        ]
+        print(f"\nIsolating what differs between the working and failing configurations, on {socket_name}.")
+        outcomes = []
+        for desc, kwargs in matrix:
+            ok, err = run(args.device, socket_name, socket,
+                          kwargs["size"], kwargs["fps"], args.seconds, args.target_features,
+                          args.settle, with_tracker=True, use_manip=kwargs["use_manip"],
+                          resize_mode=kwargs["resize_mode"], label=desc)
+            outcomes.append((desc, ok, err))
+
+        print("\n" + "=" * 72)
+        print("Matrix result:")
+        for desc, ok, err in outcomes:
+            print(f"  {'FEATURES' if ok else 'no features':<12}  {desc}")
+        good = [d for d, ok, _ in outcomes if ok]
+        bad = [d for d, ok, _ in outcomes if not ok]
+        if good and bad:
+            print(f"\nThe first failing row after a working one is the change that breaks it.")
+        elif good:
+            print("\nEverything worked. The earlier failures were not caused by any of these.")
+        else:
+            print("\nNothing worked, including the known-good configuration -- so the difference")
+            print("is elsewhere: device state, scene, or something about this session.")
+        return 0
+
     names = [args.socket] if args.socket else ["CAM_A", "CAM_B", "CAM_C"]
     results = {}
     controls = {}
     for name in names:
         results[name] = run(args.device, name, SOCKETS[name],
                             (args.width, args.height), args.fps, args.seconds,
-                            args.target_features, args.settle, with_tracker=True)
+                            args.target_features, args.settle, with_tracker=True,
+                            use_manip=not args.direct)
         if not args.skip_control:
             controls[name] = run(args.device, name, SOCKETS[name],
                                  (args.width, args.height), args.fps, args.seconds,
-                                 args.target_features, args.settle, with_tracker=False)
+                                 args.target_features, args.settle, with_tracker=False,
+                                 use_manip=not args.direct)
 
     working = [n for n, (ok, _) in results.items() if ok]
     print("\n" + "=" * 72)
