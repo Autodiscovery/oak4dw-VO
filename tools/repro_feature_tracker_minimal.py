@@ -66,6 +66,9 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle):
     frame_type = None
     pixel_stats = None
     error = ""
+    frames_seen = 0
+    first_frame_at = None
+    silent_at = None
 
     try:
         with dai.Pipeline(device) as pipeline:
@@ -92,31 +95,54 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle):
             tracker_input_q = manip.out.createOutputQueue(4, False)
 
             pipeline.start()
+            started = time.time()
 
-            # Let 3A settle before believing any pixel statistics. Without this the
-            # first frames are near-black and the brightness verdict is meaningless.
-            settle_until = time.time() + settle
-            while time.time() < settle_until and pipeline.isRunning():
-                features_q.tryGet()
-                tracker_input_q.tryGet()
-                time.sleep(0.01)
+            # Record from the very first frame rather than discarding a settle
+            # window. The device crashes within a couple of seconds here, so a
+            # settle period meant capturing nothing at all -- and reporting "no
+            # frames" as though the scene were at fault. Statistics come from the
+            # LAST frame received, which is the most settled one available.
+            #
+            # pipeline.isRunning() is not a reliable crash indicator: it kept
+            # returning True after the device had gone, because the X_LINK errors
+            # surface on the queue threads rather than this one. Silence is the
+            # signal instead.
+            deadline = started + settle + seconds
+            last_activity = started
+            while time.time() < deadline:
+                got_something = False
 
-            deadline = time.time() + seconds
-            while time.time() < deadline and pipeline.isRunning():
                 msg = features_q.tryGet()
                 if msg is not None:
                     feature_counts.append(len(msg.trackedFeatures))
+                    got_something = True
+
                 frame = tracker_input_q.tryGet()
                 if frame is not None:
+                    frames_seen += 1
+                    if first_frame_at is None:
+                        first_frame_at = time.time() - started
                     frame_type = int(frame.getType())
                     array = np.asarray(frame.getFrame())
                     if array.size:
                         pixel_stats = (float(array.mean()), float(array.std()),
                                        int(array.min()), int(array.max()))
+                    got_something = True
+
+                now = time.time()
+                if got_something:
+                    last_activity = now
+                elif frames_seen > 0 and now - last_activity > 2.0:
+                    silent_at = now - started
+                    break
+                elif frames_seen == 0 and now - started > 6.0:
+                    silent_at = now - started
+                    break
+
                 time.sleep(0.005)
 
-            if not pipeline.isRunning():
-                error = error or "pipeline stopped early (device crash)"
+            if silent_at is not None:
+                error = f"stopped delivering after {silent_at:.1f} s (device crash)"
     except Exception as exc:  # noqa: BLE001 - the failure IS the result
         error = str(exc).splitlines()[0]
     finally:
@@ -146,19 +172,27 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle):
         print("  tracker input pixels: no frame captured")
         usable_input = False
 
-    if error and not feature_counts:
-        print(f"  RESULT: no TrackedFeatures messages -- {error}")
-    elif error:
-        print(f"  RESULT: {len(feature_counts)} messages before failing -- {error}")
-    elif not feature_counts:
-        print("  RESULT: pipeline ran, but no TrackedFeatures messages were produced at all")
+    print(f"  frames to tracker:    {frames_seen}"
+          + (f", first at {first_frame_at:.2f} s" if first_frame_at is not None else ""))
+
+    if not feature_counts:
+        print("  RESULT: ZERO TrackedFeatures messages", end="")
     elif max(feature_counts) == 0:
-        print(f"  RESULT: {len(feature_counts)} messages, all EMPTY (zero features in every one)")
+        print(f"  RESULT: {len(feature_counts)} messages, all EMPTY", end="")
     else:
         print(f"  RESULT: {len(feature_counts)} messages, features per message: "
-              f"min {min(feature_counts)}, median {int(np.median(feature_counts))}, max {max(feature_counts)}")
+              f"min {min(feature_counts)}, median {int(np.median(feature_counts))}, "
+              f"max {max(feature_counts)}", end="")
+    print(f" -- {error}" if error else "")
 
-    if not usable_input and not error:
+    # Only blame the scene when the scene is actually what was seen. A crash
+    # before any frame arrived says nothing about lighting, and an earlier version
+    # advised improving it in exactly that case.
+    if error and frames_seen == 0:
+        print("  NOTE: the device stopped before delivering a single frame, so nothing here")
+        print("        reflects the scene, the lighting or the tracker's input. This is a crash")
+        print("        during pipeline start-up.")
+    elif not usable_input and frames_seen > 0 and not error:
         print("  NOTE: the input was not usable, so a zero-feature result says nothing about")
         print("        the tracker. Improve the lighting or the scene and re-run.")
 

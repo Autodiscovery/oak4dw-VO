@@ -36,13 +36,29 @@ Note this run is *more* severe than the earlier sweeps: previously the tracker
 emitted messages that were empty, whereas here no `TrackedFeatures` message was
 produced at all before the device went down.
 
-One caveat on our side: the mono frames in this particular run were very dark
-(mean 0.6 and 0.1 of 255) because the reproducer had no auto-exposure settle
-period, so the pixel content is not itself evidence. That has been fixed — the
-tool now settles 3A before measuring and judges brightness on the mean rather than
-the spread alone. The earlier sweeps, which did have well-exposed input
-(**mean 60.7, std 58.0**), produced the same zero-feature outcome, so the darkness
-here is not the explanation.
+### The crash happens within seconds of pipeline start
+
+A follow-up run made the timing clear. With a 3-second auto-exposure settle period
+before measuring, **not a single frame was captured on any socket** — the device
+had already gone down before the settle window elapsed. The earlier run, which
+measured immediately, did capture a handful of frames first.
+
+So the sequence is: pipeline starts, a few frames flow, and the firmware crashes
+within roughly one to three seconds. The reproducer now records from the first
+frame rather than discarding a settle window, and reports how long the device
+survived and how many frames reached the tracker before it stopped.
+
+Every attempt on every socket produced a crash dump; there are a dozen or so
+available in `~/.cache/depthai/crashdumps/` from these runs.
+
+One caveat on our side, disclosed for completeness: the mono frames in the
+immediate-measurement run were very dark (mean 0.6 and 0.1 of 255) because
+auto-exposure had not settled, so that particular run's pixel content is not
+itself evidence about the scene. The earlier sweeps, which did have well-exposed
+input (**mean 60.7, std 58.0**), produced the same zero-feature outcome — so
+lighting is not the explanation. The tool now judges brightness on the mean as
+well as the spread, and no longer suggests improving the lighting when the real
+cause was a crash before any frame arrived.
 
 ### Earlier finding, unchanged
 
