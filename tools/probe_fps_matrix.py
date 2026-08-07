@@ -46,6 +46,25 @@ def connect(ip, attempts=4):
     raise RuntimeError("unreachable")
 
 
+def wait_until_healthy(ip, timeout=90.0):
+    """Block until the device can be opened and closed cleanly.
+
+    A firmware crash takes 10-20 s just to extract its dump, and longer to be
+    reachable again. Running the next variant before then produces a failure
+    that belongs to the previous crash, not to the configuration being tested.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            dev = dai.Device(dai.DeviceInfo(ip)) if ip else dai.Device()
+            dev.close()
+            time.sleep(1.0)
+            return True
+        except Exception:  # noqa: BLE001
+            time.sleep(3.0)
+    return False
+
+
 def measure(ip, *, label, size, fps, sensor_resolution, frame_type, resize_mode,
             both_cameras, seconds):
     """Build one variant and return the rate each camera actually delivered."""
@@ -111,7 +130,9 @@ def measure(ip, *, label, size, fps, sensor_resolution, frame_type, resize_mode,
     else:
         print(f"  {label:<44} asked {asked:>5}   got {rates[0]:5.1f} Hz")
 
-    time.sleep(2.0)
+    # A crashed device needs far longer than a healthy one before the next
+    # variant means anything.
+    time.sleep(2.0 if (not error and max(counts) > 0) else 10.0)
     return rates, error
 
 
@@ -119,6 +140,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--device", default=None)
     parser.add_argument("--seconds", type=float, default=6.0)
+    parser.add_argument("--only", default=None,
+                        help="Run only variants whose label contains this substring.")
+    parser.add_argument("--recover", type=float, default=90.0,
+                        help="Max seconds to wait for the device to become reachable again after a crash.")
     args = parser.parse_args()
 
     print(f"depthai {dai.__version__}\n")
@@ -149,9 +174,26 @@ def main() -> int:
               frame_type=dai.ImgFrame.Type.GRAY8, resize_mode=dai.ImgResizeMode.STRETCH)),
     ]
 
+    if args.only:
+        variants = [(l, k) for l, k in variants if args.only.lower() in l.lower()]
+        if not variants:
+            print(f"  no variant matches {args.only!r}")
+            return 1
+
     results = []
+    previous_failed = False
     for label, kwargs in variants:
+        if previous_failed:
+            print("  (waiting for the device to recover from the previous crash...)")
+            if not wait_until_healthy(args.device, args.recover):
+                print("  device did not come back; stopping rather than reporting cascade failures.")
+                print("  Power-cycle it and re-run, ideally with --only to test fewer variants.")
+                break
         rates, error = measure(args.device, label=label, **kwargs)
+        crashed = bool(error) or not any(r == r and r > 0.0 for r in rates)
+        if crashed and previous_failed:
+            print("      ^ follows an earlier crash; treat with suspicion")
+        previous_failed = crashed
         results.append((label, kwargs.get("fps"), rates, error))
 
     print("\n" + "=" * 88)
