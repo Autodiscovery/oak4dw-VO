@@ -58,8 +58,9 @@ def connect(ip: str | None, attempts: int = 4):
     raise RuntimeError("unreachable")
 
 
-def run(ip, socket_name, socket, size, fps, seconds, target_features, settle):
-    print(f"\n--- {socket_name} at {size[0]}x{size[1]} ---")
+def run(ip, socket_name, socket, size, fps, seconds, target_features, settle, with_tracker=True):
+    label = "WITH FeatureTracker" if with_tracker else "CONTROL: no FeatureTracker"
+    print(f"\n--- {socket_name} at {size[0]}x{size[1]}, {label} ---")
     device = connect(ip)
 
     feature_counts: list[int] = []
@@ -86,12 +87,17 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle):
             manip.setMaxOutputFrameSize(size[0] * size[1] * 3)
             cam_out.link(manip.inputImage)
 
-            # 3. FeatureTracker.
-            tracker = pipeline.create(dai.node.FeatureTracker)
-            tracker.initialConfig.setNumTargetFeatures(target_features)
-            manip.out.link(tracker.inputImage)
+            # 3. FeatureTracker -- omitted in the control run, which is otherwise
+            #    byte-for-byte identical. If the device survives without it and
+            #    crashes with it, the tracker is implicated; if it crashes either
+            #    way, the fault is upstream and this is not a tracker bug at all.
+            features_q = None
+            if with_tracker:
+                tracker = pipeline.create(dai.node.FeatureTracker)
+                tracker.initialConfig.setNumTargetFeatures(target_features)
+                manip.out.link(tracker.inputImage)
+                features_q = tracker.outputFeatures.createOutputQueue(8, False)
 
-            features_q = tracker.outputFeatures.createOutputQueue(8, False)
             tracker_input_q = manip.out.createOutputQueue(4, False)
 
             pipeline.start()
@@ -112,7 +118,7 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle):
             while time.time() < deadline:
                 got_something = False
 
-                msg = features_q.tryGet()
+                msg = features_q.tryGet() if features_q is not None else None
                 if msg is not None:
                     feature_counts.append(len(msg.trackedFeatures))
                     got_something = True
@@ -212,6 +218,8 @@ def main() -> int:
     parser.add_argument("--settle", type=float, default=3.0,
                         help="Seconds to let auto-exposure settle before measuring.")
     parser.add_argument("--target-features", type=int, default=320)
+    parser.add_argument("--skip-control", action="store_true",
+                        help="Skip the no-FeatureTracker control run (halves the runtime, but the control is what makes the result evidence rather than correlation).")
     args = parser.parse_args()
 
     print("FeatureTracker minimal reproducer")
@@ -231,13 +239,43 @@ def main() -> int:
 
     names = [args.socket] if args.socket else ["CAM_A", "CAM_B", "CAM_C"]
     results = {}
+    controls = {}
     for name in names:
         results[name] = run(args.device, name, SOCKETS[name],
                             (args.width, args.height), args.fps, args.seconds,
-                            args.target_features, args.settle)
+                            args.target_features, args.settle, with_tracker=True)
+        if not args.skip_control:
+            controls[name] = run(args.device, name, SOCKETS[name],
+                                 (args.width, args.height), args.fps, args.seconds,
+                                 args.target_features, args.settle, with_tracker=False)
 
     working = [n for n, (ok, _) in results.items() if ok]
     print("\n" + "=" * 72)
+
+    # The control is the load-bearing comparison. Without it, "the device crashed
+    # while a FeatureTracker was in the pipeline" is not evidence that the tracker
+    # caused it -- and that is the first thing any maintainer will ask.
+    if controls:
+        tracker_failed = [n for n, (_, err) in results.items() if err]
+        control_failed = [n for n, (_, err) in controls.items() if err]
+        print("Control comparison -- identical pipeline with and without the tracker:")
+        for name in names:
+            with_err = results[name][1] or "ok"
+            without_err = controls[name][1] or "ok"
+            print(f"  {name:<6} with tracker: {with_err[:44]:<44} without: {without_err[:30]}")
+        print()
+        if tracker_failed and not control_failed:
+            print("The device is stable without the FeatureTracker and fails with it, on an")
+            print("otherwise identical pipeline. That implicates the tracker directly.")
+        elif tracker_failed and control_failed:
+            print("The device fails WITH AND WITHOUT the FeatureTracker. The tracker is not the")
+            print("cause -- something upstream of it is unstable on this device, and a report")
+            print("blaming the tracker would be wrong. Investigate the camera and manip path,")
+            print("and note CAM_A's 'Signal not present on input', which suggests FSYNC.")
+        elif not tracker_failed:
+            print("Nothing failed this run.")
+    print()
+
     if working == list(results):
         print("FeatureTracker produced features on every socket tested. Working as intended.")
     elif working:
@@ -246,10 +284,9 @@ def main() -> int:
         print("A per-socket difference is the useful detail here -- include it in any report,")
         print("since it narrows the problem considerably compared with 'does not work'.")
     else:
-        print("No features on any socket, on the supported NV12 -> GRAY8 -> tracker path,")
-        print("with GRAY8 confirmed at the tracker input and non-blank pixel statistics.")
+        print("No features on any socket, on the supported NV12 -> GRAY8 -> tracker path.")
         print("\nInclude with a report:")
-        print("  * this output in full")
+        print("  * this output in full, including the control comparison")
         print("  * oakctl device info      (Luxonis OS version)")
         print("  * oakctl device update    (output, even if already current)")
         print("  * this script, which is self-contained")
