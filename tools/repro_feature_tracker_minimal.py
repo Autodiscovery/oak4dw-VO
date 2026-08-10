@@ -58,6 +58,69 @@ def connect(ip: str | None, attempts: int = 4):
     raise RuntimeError("unreachable")
 
 
+def wait_until_healthy(ip, timeout=120.0):
+    """Block until the device opens and closes cleanly.
+
+    A firmware crash takes 10-20 s to dump and longer to become reachable. Testing
+    before then measures the previous crash, not the current configuration.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            dev = dai.Device(dai.DeviceInfo(ip)) if ip else dai.Device()
+            dev.close()
+            time.sleep(1.5)
+            return True
+        except Exception:  # noqa: BLE001
+            time.sleep(3.0)
+    return False
+
+
+def health_check(ip, seconds=10.0):
+    """The simplest thing that can show the device is well: one camera, nothing else.
+
+    No manip, no tracker, no stereo. If this fails, the device needs a power cycle
+    and no other result from it means anything.
+    """
+    print("Health check: one camera, no manip, no tracker, no stereo.")
+    device = connect(ip)
+    frames = 0
+    error = ""
+    started = None
+    try:
+        with dai.Pipeline(device) as pipeline:
+            cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+            q = cam.requestOutput((640, 400)).createOutputQueue(4, False)
+            pipeline.start()
+            started = time.time()
+            while time.time() - started < seconds:
+                if q.tryGet() is not None:
+                    frames += 1
+                time.sleep(0.002)
+    except Exception as exc:  # noqa: BLE001
+        error = str(exc).splitlines()[0]
+    finally:
+        try:
+            device.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    elapsed = (time.time() - started) if started else 0.0
+    rate = frames / elapsed if elapsed > 1.0 else 0.0
+    print(f"  {frames} frames in {elapsed:.1f} s  ({rate:.1f} Hz)")
+    if error:
+        print(f"  FAILED: {error}")
+    if error or frames < 10:
+        print()
+        print("  The device is NOT healthy. Power-cycle it -- unplug PoE, wait ten seconds,")
+        print("  plug it back in, wait for it to boot -- and run this again. Until this passes,")
+        print("  no other measurement from this device is worth recording.")
+        return False
+    print()
+    print("  Healthy. Safe to run the other probes.")
+    return True
+
+
 def run(ip, socket_name, socket, size, fps, seconds, target_features, settle,
         with_tracker=True, use_manip=True, resize_mode=None, label=None, threshold=20000):
     if label is None:
@@ -263,6 +326,8 @@ def main() -> int:
     parser.add_argument("--threshold", type=int, default=20000,
                         help="Harris initial threshold. 0 selects automatic, which returns "
                              "empty messages on RVC4. Order 10^4 is the working scale.")
+    parser.add_argument("--health", action="store_true",
+                        help="Just check the device is well: one camera, nothing else. Run this after any crash, before trusting anything else.")
     parser.add_argument("--threshold-sweep", action="store_true",
                         help="Try a range of thresholds on one socket to characterise the effect.")
     parser.add_argument("--direct", action="store_true",
@@ -284,6 +349,15 @@ def main() -> int:
         time.sleep(1.0)
     except Exception as exc:  # noqa: BLE001
         print(f"device:          could not query ({exc})")
+
+    # Health check first, always. After a firmware crash the device can stay
+    # degraded until it is power-cycled, and it then fails configurations that
+    # worked minutes earlier -- which reads as new evidence and is not. Refusing to
+    # measure an unwell device is cheaper than discarding the results afterwards.
+    if not health_check(args.device):
+        return 1
+    if args.health:
+        return 0
 
     print("\nPoint the camera at something textured and well lit -- a bookshelf, a desk,")
     print("anything visually busy. A blank wall legitimately has no corners to find.")
@@ -356,11 +430,17 @@ def main() -> int:
     results = {}
     controls = {}
     for name in names:
+        if not wait_until_healthy(args.device):
+            print("  device unreachable; stopping rather than reporting cascade failures")
+            break
         results[name] = run(args.device, name, SOCKETS[name],
                             (args.width, args.height), args.fps, args.seconds,
                             args.target_features, args.settle, with_tracker=True,
                             use_manip=not args.direct, threshold=args.threshold)
         if not args.skip_control:
+            if not wait_until_healthy(args.device):
+                print("  device unreachable; skipping the control for this socket")
+                continue
             controls[name] = run(args.device, name, SOCKETS[name],
                                  (args.width, args.height), args.fps, args.seconds,
                                  args.target_features, args.settle, with_tracker=False,
