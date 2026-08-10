@@ -59,7 +59,7 @@ def connect(ip: str | None, attempts: int = 4):
 
 
 def run(ip, socket_name, socket, size, fps, seconds, target_features, settle,
-        with_tracker=True, use_manip=True, resize_mode=None, label=None):
+        with_tracker=True, use_manip=True, resize_mode=None, label=None, threshold=20000):
     if label is None:
         label = "WITH FeatureTracker" if with_tracker else "CONTROL: no FeatureTracker"
     print(f"\n--- {socket_name} {size[0]}x{size[1]}: {label} ---")
@@ -110,7 +110,26 @@ def run(ip, socket_name, socket, size, fps, seconds, target_features, settle,
             features_q = None
             if with_tracker:
                 tracker = pipeline.create(dai.node.FeatureTracker)
-                tracker.initialConfig.setNumTargetFeatures(target_features)
+
+                # Configure the corner detector EXPLICITLY, threshold included.
+                # The automatic threshold (initialValue 0) returns empty feature
+                # messages on RVC4 -- the node runs, finds nothing, and reports
+                # nothing, with no error to say why.
+                #
+                # Scale matters here and is easy to get wrong: the Harris response
+                # threshold is a large integer, order 10^4. An earlier version of
+                # this probe tested an "explicit threshold" of 0.01, which is six
+                # orders of magnitude below a working value, and recorded the
+                # resulting failure as evidence that explicit thresholds did not
+                # help. They do; that number was simply nonsense.
+                corner = dai.FeatureTrackerConfig.CornerDetector()
+                corner.numMaxFeatures = target_features
+                corner.numTargetFeatures = target_features
+                thresholds = dai.FeatureTrackerConfig.CornerDetector.Thresholds()
+                thresholds.initialValue = threshold
+                corner.thresholds = thresholds
+                tracker.initialConfig.setCornerDetector(corner)
+
                 tracker_source.link(tracker.inputImage)
                 features_q = tracker.outputFeatures.createOutputQueue(8, False)
 
@@ -240,7 +259,12 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=6.0)
     parser.add_argument("--settle", type=float, default=3.0,
                         help="Seconds to let auto-exposure settle before measuring.")
-    parser.add_argument("--target-features", type=int, default=320)
+    parser.add_argument("--target-features", type=int, default=256)
+    parser.add_argument("--threshold", type=int, default=20000,
+                        help="Harris initial threshold. 0 selects automatic, which returns "
+                             "empty messages on RVC4. Order 10^4 is the working scale.")
+    parser.add_argument("--threshold-sweep", action="store_true",
+                        help="Try a range of thresholds on one socket to characterise the effect.")
     parser.add_argument("--direct", action="store_true",
                         help="Link Camera GRAY8 straight to the tracker, no ImageManip.")
     parser.add_argument("--matrix", action="store_true",
@@ -263,6 +287,25 @@ def main() -> int:
 
     print("\nPoint the camera at something textured and well lit -- a bookshelf, a desk,")
     print("anything visually busy. A blank wall legitimately has no corners to find.")
+
+    if args.threshold_sweep:
+        # Characterise the threshold rather than confirming a single value. What
+        # matters for the VO is not just "does 20000 work" but how sensitive the
+        # feature count is to it -- a knob that only works at one exact value is a
+        # different proposition from one with a broad usable range.
+        socket_name = args.socket or "CAM_B"
+        print(f"\nThreshold sweep on {socket_name}. 0 is the automatic setting.")
+        for value in (0, 1000, 5000, 20000, 50000, 200000):
+            run(args.device, socket_name, SOCKETS[socket_name],
+                (args.width, args.height), args.fps, args.seconds,
+                args.target_features, args.settle, with_tracker=True,
+                use_manip=not args.direct, threshold=value,
+                label=f"threshold {value}" + (" (automatic)" if value == 0 else ""))
+        print("\n" + "=" * 72)
+        print("A broad plateau means the threshold is a safe thing to set and forget.")
+        print("A narrow peak means it will need tuning per scene, which for VO would be a")
+        print("real drawback -- lighting changes as the camera moves.")
+        return 0
 
     if args.matrix:
         # A working configuration exists: Camera GRAY8 linked STRAIGHT to the
@@ -291,7 +334,7 @@ def main() -> int:
             ok, err = run(args.device, socket_name, socket,
                           kwargs["size"], kwargs["fps"], args.seconds, args.target_features,
                           args.settle, with_tracker=True, use_manip=kwargs["use_manip"],
-                          resize_mode=kwargs["resize_mode"], label=desc)
+                          resize_mode=kwargs["resize_mode"], label=desc, threshold=args.threshold)
             outcomes.append((desc, ok, err))
 
         print("\n" + "=" * 72)
@@ -316,12 +359,12 @@ def main() -> int:
         results[name] = run(args.device, name, SOCKETS[name],
                             (args.width, args.height), args.fps, args.seconds,
                             args.target_features, args.settle, with_tracker=True,
-                            use_manip=not args.direct)
+                            use_manip=not args.direct, threshold=args.threshold)
         if not args.skip_control:
             controls[name] = run(args.device, name, SOCKETS[name],
                                  (args.width, args.height), args.fps, args.seconds,
                                  args.target_features, args.settle, with_tracker=False,
-                                 use_manip=not args.direct)
+                                 use_manip=not args.direct, threshold=args.threshold)
 
     working = [n for n, (ok, _) in results.items() if ok]
     print("\n" + "=" * 72)
