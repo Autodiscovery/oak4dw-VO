@@ -187,16 +187,25 @@ params/cyclonedds.xml       DDS peer config for the Ethernet link
 tools/
   validate_estimator_math.py   numerical oracle for the C++ maths (runs anywhere)
   phase0_calibration_check.py  on-device calibration / FoV / disparity-noise measurement
+  probe_feature_tracker.py     --luxonis-config checks the HW tracker before you enable it
+  phase5_resource_check.py     LENS co-run: latency/jitter A/B, and depth agreement
 ros_ws/src/oak_vio_msgs/    VioStatus.msg
 ros_ws/src/oak_vio/
   include/oak_vio/          estimator headers (no ROS, no DepthAI)
   src/motion_estimator.cpp  GN + analytic Jacobians + depth-uncertainty weighting
   src/ransac.cpp            3-point Umeyama hypotheses, reprojection scoring
+  src/imu_integrator.cpp    Phase 4: gyro -> inter-frame rotation prior, bias estimation
+  src/imu_filter.cpp        Phase 4: 15-state error-state KF (scaffold, off by default)
+  src/cpu_feature_tracker.cpp  OpenCV Harris + LK front-end (the default)
   src/stereo_vio.cpp        orchestrator
   src/stereo_vio_node.cpp   BaseNode: queues, odometry/TF/status publishing
   src/stereo_vio_pipeline.cpp  BasePipeline plugin
-  test/                     gtest suite, no hardware required
+  test/                     gtest suite, no hardware required (68 tests)
 ```
+
+Both Phase 4 units are free of DepthAI on purpose: the node converts
+`dai::IMUPacket` into `ImuSample` at the boundary, which is what keeps the gyro
+integration and the filter testable against analytic trajectories on a laptop.
 
 The estimator core has no ROS or DepthAI dependency, which is why it can be
 tested on a laptop.
@@ -213,6 +222,13 @@ tested on a laptop.
 Read `~/vo/status`, not just the odometry. When tracking is lost the estimator
 holds the last pose with an inflated covariance rather than guessing, so
 `/odometry` alone looks superficially fine while the state is `LOST`.
+
+`VioStatus` also reports which front-end produced the features, which depth
+source was used, and the IMU's contribution (`gyro_prior_used`,
+`gyro_prior_rejection`, `gyro_bias_ready`, `gyro_bias`). `imu_filter_active`
+says whether `~/vo/odometry` is coming from the error-state filter or straight
+from the VO integrator — worth checking rather than assuming, since the two mean
+different things.
 
 Poses are published in the ROS body convention (x forward, y left, z up), not
 the camera optical convention — the pose, twist and covariance are all rotated.
@@ -287,6 +303,23 @@ covariance calibration and the depth-uncertainty regression.
 colcon test --packages-select oak_vio --event-handlers console_direct+
 ```
 
+68 tests, no hardware needed. The estimator core has no ROS or DepthAI
+dependency beyond ament and Eigen, so it also builds standalone with nothing but
+a compiler and Eigen — which is how the suite was finally run:
+
+```bash
+for f in motion_estimator ransac bucketing keyframe_manager motion_model \
+         pose_integrator stereo_vio imu_integrator imu_filter; do
+  g++ -std=c++17 -O2 -c -Iinclude -I/usr/include/eigen3 src/$f.cpp -o /tmp/$f.o
+done
+g++ -std=c++17 -O2 -Iinclude -Itest -I/usr/include/eigen3 test/test_*.cpp /tmp/*.o \
+    -lgtest -lgtest_main -pthread -o /tmp/test_oak_vio && /tmp/test_oak_vio
+```
+
+Note for anyone repeating it: GCC 13 with Eigen 3.4 emits a
+`maybe-uninitialized` warning from inside Eigen's own headers, so `-Werror`
+fails on a dependency rather than on this code.
+
 **Phase 0, on the device** — do this before tuning anything:
 
 ```bash
@@ -317,6 +350,70 @@ compare loop drift.
 oakctl app exec <app-id> top -bn1
 ```
 
+## What running the tests found
+
+The gtest suite had been written but never executed — no toolchain. Running it
+found three defects, all in code the README already described as validated. Two
+of them were caught by tests that were *already written and already correct*;
+they had simply never been given the chance to fail.
+
+### 1. A good seed made RANSAC do the *most* work, not the least
+
+`ransac.cpp` evaluated the seed hypothesis first, exactly as documented — and
+then never used its inlier ratio to set the adaptive iteration budget. The budget
+was lowered only inside the sampling loop, when a *random* hypothesis beat the
+current best. So in precisely the case the seed exists for, where the seed is
+already the best hypothesis and nothing beats it, the budget stayed at
+`ransacMaxIterations` and the solve ran all 200 iterations.
+
+The comment above it said "starting from a strong inlier ratio collapses the
+adaptive iteration count to the minimum". It could not. It matters twice:
+
+- The estimator is the only part of this pipeline that costs real ARM cycles,
+  and this was a ~10× overspend on every smoothly-tracking frame. Fixing it cut
+  the trajectory tests' wall time roughly in half.
+- **Phase 4's entire rationale is that a better seed is cheap because RANSAC
+  exploits it.** It did not. The gyro prior would have been measured against a
+  solver that could not benefit from it — and would have looked useless.
+
+Caught by `Ransac.GoodSeedReducesIterations`, which was already there.
+
+### 2. "Closed-loop drift" was measured on a loop that did not close
+
+`makeLoopTrajectory(frames, ...)` stepped the phase by `2π i / frames`, so the
+last pose stopped one step short of the start. Every test then measured drift as
+the distance from the final estimate to `trajectory.front()`. For the 120-frame,
+0.5 m loop that is 26 mm of pure geometry reported as drift, against a 1 mm
+tolerance — while the estimator was accurate to well under 1 mm, which the
+*other* assertions in the same test confirmed. Divisor is now `frames - 1`, and
+the loop closes exactly.
+
+This one is worth noting beyond the fix: closed-loop drift is the headline
+metric of this whole project, and its definition in the test harness was wrong.
+
+### 3. A blackout reported `Initialising`, not `Lost`
+
+`KeyframeManager::hasKeyframe()` is `!keyframe_.empty()`, so a keyframe promoted
+from zero observations leaves no keyframe, and the next frame took the bootstrap
+branch and reported `Initialising` — after minutes of good tracking.
+
+The README tells consumers to read `~/vo/status` rather than infer health from
+the odometry. Those two states mean opposite things to a downstream filter:
+`Initialising` says "no pose yet, wait", `Lost` says "hold the last pose and
+inflate the covariance". Conflating them defeats the purpose of the topic.
+`StereoVio` now tracks whether anything has ever tracked, and reports `Lost`
+when it has.
+
+### And two test tolerances that could never have passed
+
+`Observation` stores `u`, `v` and `disparity` as **float**, so a pixel
+coordinate near 1000 carries ~1.2e-4 px of quantisation before the estimator
+sees it. The noise-free "exactness" tests demanded 1e-8 m, which is asking for
+double-precision exactness from a float measurement — about 1e-7 is the floor,
+and 1e-6 rad for the three-point minimal solve, which has no averaging to hide
+behind. Tolerances are now derived from the measurement's precision with ~10×
+headroom, and say so.
+
 ## Next steps
 
 Do these in order. Steps 1 and 2 are prerequisites for everything else, and
@@ -324,10 +421,16 @@ step 2 produces the numbers that make step 3's tuning meaningful.
 
 ### Step 1 — First C++ compile
 
-**Status: not yet done.** There was no C++ toolchain on the machine this was
-written on, so the estimator maths was validated numerically in Python instead
-(see [Verification](#verification)) but nothing here has been through a
-compiler. Budget an hour or two for first-build friction.
+**Status: the estimator core and its full gtest suite now compile and pass — 68
+tests.** That had never happened before, because the machine this was written on
+had no C++ toolchain. Running the suite for the first time found three real
+defects, described in [What running the tests found](#what-running-the-tests-found)
+below; one of them had been costing roughly a 10× overspend in the estimator on
+every smoothly-tracking frame.
+
+Still not compiled: `stereo_vio_node.cpp` and `stereo_vio_pipeline.cpp`, which
+need DepthAI and ROS headers. Those are the two files the table below is about,
+and they are where to expect first-build friction.
 
 On a machine with ROS 2 Jazzy:
 
@@ -457,41 +560,108 @@ Then, on the host, in order:
 
 ### Step 4 — Phase 4: IMU aid
 
-Deferred by agreement, and the code is already shaped for it.
-`motion_model.hpp` is the slot: `MotionModel::predict()` currently extrapolates
-constant velocity, and the gyro-integrated rotation replaces or blends with its
-rotation component. Nothing downstream changes.
+**Implemented. Steps 1–3 on by default; the filter is a scaffold and off.**
 
-Scope, in dependency order:
+```yaml
+vio.i_imu_enabled: true                 # gyro rotation prior — on
+vio.i_imu_filter_enabled: false         # error-state filter — scaffold, off
+```
 
-1. Add `dai::node::IMU` to the pipeline in `stereo_vio_pipeline.cpp` and feed it
-   into the existing `Sync` node, so IMU samples arrive time-aligned with frames.
-2. Read `calib.getImuToCameraExtrinsics(CAM_B)` at startup.
-3. Integrate gyro between frame timestamps into a rotation prior; feed it as
-   the seed to `RansacMotionSolver::solve` (which already evaluates the seed as
-   a hypothesis, so this needs no estimator change).
-4. Add an error-state Kalman filter fusing VO relative pose with IMU, using the
-   accelerometer's gravity direction to bound roll and pitch drift — the only
-   drift axes that are observable-and-correctable without external reference.
-5. Publish odometry at IMU rate (~200 Hz) rather than frame rate.
+**Steps 1–3, the gyro rotation prior.** The gyro is integrated between frame
+timestamps and supplies the rotation component of the RANSAC seed; translation
+still comes from constant velocity. Nothing downstream changed — the estimator
+already evaluated its seed as a hypothesis in its own right (though see the bug
+below: it did not actually *exploit* it until now).
 
-Worth doing in that order: steps 1–3 alone measurably improve robustness under
-fast rotation and motion blur, and are much less work than the filter.
+Two deliberate departures from the plan above:
+
+**The IMU does not go through `Sync`.** `Sync` emits one message per input per
+completed group, so pairing a 200 Hz IMU against a 10–30 Hz camera through it
+delivers one IMU message per frame and discards the rest — and the rest is the
+whole point, since the prior is an *integral over the frame interval*, not the
+one sample nearest the shutter. Batched `IMUData` softens that but does not fix
+it, because the batch boundaries have nothing to do with the frame boundaries.
+So the IMU has its own queue, a callback buffering into `ImuIntegrator`, and the
+frame callback integrates over `[previous frame, this frame]`. That also
+decouples the frame sync window from the IMU rate.
+
+**Two rotations, not one.** `getImuToCameraExtrinsics(CAM_B)` gives IMU → *raw*
+left camera, but the estimator's pixels live in the *rectified* left frame. The
+node composes `getStereoLeftRectificationRotation()` on top. Skipping that leaves
+the prior wrong by the rectification angle — a couple of degrees, so the prior
+still looks broadly right and merely underperforms, which is the sort of error
+that survives for months. Startup logs how much that rotation contributes.
+
+What the integrator refuses to answer is as important as what it computes. It
+rejects a window whose samples do not cover it — including an *interior* gap
+from a dropped transport burst, which a naive "were there samples?" check misses
+entirely, because the trapezoid quietly spans the hole and reports a confidently
+too-small rotation. It holds the rate across the sub-sample slivers at each
+window edge, which otherwise cost up to 2.5% of every rotation, always in the
+same direction. And it learns gyro bias only from intervals where *both* the
+gyro reads still and |a| matches gravity — a smooth constant-rate turn passes
+the accelerometer test alone, and learning that as bias would subtract the turn
+rate from every subsequent frame.
+
+**Steps 4–5, the filter.** `imu_filter.hpp` is a 15-state error-state Kalman
+filter: attitude, velocity, position, gyro bias, accelerometer bias, with a local
+attitude perturbation (no Euler angles, no gimbal lock). Propagation and the
+gravity update are pinned by unit tests; the filter as a whole has never run on
+hardware. Honest scope:
+
+- **Roll and pitch are bounded.** Gravity is an absolute direction, so those two
+  axes are observable and correctable indefinitely. A test asserts exactly that,
+  *and* that yaw is neither corrected nor corrupted — an accelerometer carries no
+  yaw information, and a filter that appeared to fix yaw would be fitting noise.
+- **Yaw and position still drift.** Nothing here changes that without an external
+  reference. Gyro bias is observable through gravity, which the tests confirm.
+- **The VO update is the unvalidated part.** It treats integrated absolute VO
+  poses as independent fixes, while their error is a random walk and strongly
+  correlated frame to frame. That makes the filter over-confident — the dangerous
+  direction. The correct treatment is a relative-pose update against a cloned
+  anchor state; `voCovarianceScale` is the blunt instrument until then.
+
+`vio.i_publish_at_imu_rate` republishes odometry from the filter at IMU rate; the
+frame-rate publish stands down so the topic carries one pose per instant. At the
+10 Hz this rig is FSYNC-limited to, that is the difference between usable and not
+for a controller.
 
 ### Step 5 — Phase 5: LENS co-run
 
-Add `dai::node::NeuralDepth` in `stereo_vio_pipeline.cpp` alongside the VO
-node. The engines are separate — VO uses the feature-tracker and stereo blocks,
-LENS runs on the DSP — so they should coexist, but verify rather than assume:
-re-run the resource check from step 3 and watch for thermal throttling under
-sustained load.
+**Implemented, both halves, both off by default.**
 
-`depth_source.hpp` already abstracts the disparity lookup, so if you later want
-VO to consume LENS depth instead of the block matcher, implement it with
-`DepthMapSource` and drop the block matcher entirely. Read the caveat in that
-header first — neural depth is smoothed and partly inferred, which is good for
-dense perception and less good for VO, where a locally biased depth at a
-feature becomes a biased pose.
+```yaml
+vio.i_enable_neural_depth: false        # co-run NeuralDepth on the DSP
+vio.i_depth_source: block_matcher       # or "neural" to feed VO from LENS
+```
+
+Two separate questions with different answers, so they are separate switches.
+
+**Co-running.** `dai::node::NeuralDepth` is built inside the VO node rather than
+beside it in the pipeline plugin, because it is fed the **already-rectified** pair
+with its own rectification disabled. That avoids paying for rectification twice,
+and — the part that matters — puts the neural depth map in the same frame as our
+disparity, which is what lets `DepthMapSource` substitute for
+`DisparityMapSource` without touching the camera model.
+
+**Measuring it.** `tools/phase5_resource_check.py` runs the A/B. The thing it
+does *not* measure is frame rate: this camera is an FSYNC slave at a fixed ~10 Hz,
+so throughput cannot drop and a throughput test would report "no contention"
+whatever the DSP is doing. Contention shows up as **latency and jitter** instead
+— the same frames arriving later and less regularly — so that is what it
+measures, against one frame interval as the scale that matters.
+
+**Consuming it.** `--compare-depth` measures how far the two depth sources
+disagree, per pixel and by range. Read it against this rig's own numbers: Phase 0
+measured σ_d = 0.3 px, about 6% depth error at 5 m. A median disagreement well
+under that is in the noise; comparable or larger means neural depth would be the
+dominant error term in the pose. It measures *disagreement*, not error — neither
+source is ground truth, so a large number says they differ, not which is wrong.
+Closed-loop drift is the arbiter.
+
+Prefer the block matcher for VO when both are running. Neural depth is smoothed
+and, on low texture, partly inferred: excellent for dense perception, and a
+locally biased depth at a feature is a biased pose.
 
 ## Status
 
@@ -617,12 +787,69 @@ inter-frame overlap, which matters most under fast rotation.
 Next up: the closed-loop drift test, and Phase 0 `rectify` to settle absolute
 scale.
 
-## Blocker: the RVC4 hardware feature tracker does not work
+## The RVC4 hardware feature tracker: two causes found, both now fixed in code
 
-**Status: `dai::node::FeatureTracker` crashes the firmware on this OAK-4-D-W,
-confirmed against a control.** On an otherwise byte-for-byte identical pipeline,
-removing that one node makes the device stable; adding it back crashes the firmware
-after a single frame:
+**Status: available behind `vio.i_use_hw_tracker`, default off, pending
+confirmation on the device.**
+
+Luxonis answered the [forum thread](https://discuss.luxonis.com/d/6988-featuretracker-non-functional-on-rvc4/3):
+the `Camera (NV12) → ImageManip (GRAY8) → FeatureTracker` path does work, but the
+**automatic corner-detector threshold returns empty feature messages on RVC4**.
+The detector has to be configured explicitly.
+
+Checking that against our own probe turned up a **second, independent cause on
+our side**, and it is the more embarrassing of the two:
+
+| | What was wrong | Effect |
+|---|---|---|
+| Luxonis's finding | `thresholds` left at AUTO (`initialValue` 0) | empty feature messages |
+| Ours | `corner.numMaxFeatures` never set, and it **defaults to 0** | detector capped at zero features |
+| Ours | the one explicit-threshold test passed `0.01` | the working value is `20000` — six orders of magnitude out |
+
+Each of those three produces an identical symptom: a node that runs, emits empty
+messages, and explains nothing. The probe's "explicit Harris threshold 0.01"
+variant hit two of them at once, and its failure was recorded as evidence that
+explicit thresholds did not help. That conclusion was wrong, and it is the reason
+this sat as a blocker rather than as a configuration error.
+
+The `0.01` row is still in the sweep, now labelled as the negative control it
+always was. Reproduce and verify with:
+
+```bash
+python3 tools/probe_feature_tracker.py --device <ip> --luxonis-config
+```
+
+That runs the working configuration and sweeps the threshold (a Harris threshold
+is scene-dependent, so the shape of the sweep is the useful output, not one
+number). If it reports corners, set `vio.i_use_hw_tracker: true`.
+
+**What is still unexplained.** The firmware crashes are not accounted for by any
+of the above. A misconfigured detector should find nothing, not take the device
+down, and `Camera::requestOutput(..., GRAY8, ...)` silently returning NV12 is a
+separate defect regardless. Both remain in
+[docs/luxonis-bug-featuretracker-rvc4.md](docs/luxonis-bug-featuretracker-rvc4.md),
+narrowed to what is actually still wrong. Note also that roughly twenty firmware
+crashes accumulated in one session, after which the device began failing
+configurations that had demonstrably worked earlier the same day — so re-test
+from a cold boot, and treat anything measured after the first crash of a session
+as suspect rather than as data.
+
+**Why bother, given the CPU tracker works.** The hardware block costs ~0 CPU
+against the CPU tracker's 8–12 ms/frame, and that is what bounds resolution:
+tracking dropped to 640×400 to afford the ARM cycles, which halved the focal
+length and doubled depth sigma at 5 m from ~29 cm to ~59 cm. Recovering the
+hardware path buys that back and frees the cycles for LENS.
+
+Two things the hardware block does **not** do, which the CPU tracker does, and
+both feed straight into pose error: subpixel refinement (`cornerSubPix`) and the
+forward–backward consistency check. So re-run the stationary test after
+switching. A worse stationary drift number from a cheaper front-end is a real
+trade to weigh, not a bug.
+
+### The original evidence, retained
+
+On an otherwise byte-for-byte identical pipeline, removing that one node made the
+device stable; adding it back crashed the firmware after a single frame:
 
 | Socket | With `FeatureTracker` | Control: no tracker |
 |---|---|---|
@@ -663,12 +890,13 @@ Written up in [docs/luxonis-bug-featuretracker-rvc4.md](docs/luxonis-bug-feature
 ready to file once the two version numbers are filled in.
 
 **Consequence for this design.** The plan's cost argument rested on the RVC4
-doing Harris and Lucas-Kanade in fixed-function hardware for free. That is
-currently unavailable, so the front-end has moved to the ARM cores. The plan
-listed this as a known risk with a CPU fallback as the contingency; it has
-simply come to pass.
+doing Harris and Lucas-Kanade in fixed-function hardware for free. Until the
+configuration above is confirmed on the device, the front-end runs on the ARM
+cores and remains the default. The plan listed this as a known risk with a CPU
+fallback as the contingency, and the fallback is what has been carrying the
+project.
 
-### What replaced it
+### The CPU front-end (still the default)
 
 [`cpu_feature_tracker.hpp`](ros_ws/src/oak_vio/include/oak_vio/cpu_feature_tracker.hpp)
 — OpenCV `goodFeaturesToTrack` (Harris) plus `calcOpticalFlowPyrLK`, presenting
@@ -771,8 +999,24 @@ one interface.
 - **The `_v3` package suffix** applies on Humble/Jazzy and was dropped in
   Kilted. `CMakeLists.txt` resolves either; `oakapp.toml` tries the metapackage
   then falls back.
-- **IMU fusion is Phase 4**, as agreed. `motion_model.hpp` is the slot the gyro
-  prior drops into.
+- **The gyro prior is implemented but unmeasured on hardware.** The plumbing is
+  reported rather than assumed — `~/vo/status` carries `gyro_prior_used` and, when
+  it was not used, `gyro_prior_rejection`, and the periodic log prints uses
+  against rejections. That distinction is the one to watch first: a prior being
+  silently rejected every frame is indistinguishable from a prior that does not
+  help. Whether it *improves* anything is an A/B under real motion blur, and the
+  synthetic test deliberately claims only non-regression — on 300 clean corners
+  RANSAC succeeds from any seed, so a simulated win would be an artefact of how
+  hard the scene was made.
+- **The IMU extrinsic is the prior's weak point.** A wrong IMU→rectified-camera
+  rotation makes the prior confidently wrong in a fixed direction, which is worse
+  than no prior. Startup logs the rectification contribution; if the prior is
+  being used but tracking is no better, drop `vio.i_imu_rotation_prior_weight`
+  toward 0 and see whether things improve — if they do, suspect the extrinsic.
+- **The error-state filter has never run on hardware**, and its VO update is
+  known to be over-confident by construction (see Phase 4 above). It stays behind
+  `vio.i_imu_filter_enabled: false` until there are loop-drift numbers either
+  side of it.
 - **If Phase 0 shows the rectified FoV is unusable**, the fallback is
   Kannala-Brandt on raw fisheye with the pair treated as two monocular cameras
   with fixed extrinsics — ORB-SLAM3's design. Only the projection function
