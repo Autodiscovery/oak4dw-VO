@@ -125,7 +125,49 @@
       # problem that has not been shown to matter.
       i_mask_border_fraction: 0.0
 
+      # ---- Which feature front-end ---------------------------------------
+      # false: OpenCV Harris + Lucas-Kanade on the ARM cores (8-12 ms/frame at
+      #        640x400). What has been shipping, and what the Status numbers in
+      #        the README were measured with.
+      # true:  the RVC4 hardware feature-tracker block, which costs ~0 CPU and
+      #        would let tracking run at 1280x800 -- halving depth sigma, since
+      #        the focal length doubles.
+      #
+      # Default false, and it should stay false until it is confirmed on YOUR
+      # device. The history is in docs/luxonis-bug-featuretracker-rvc4.md: this
+      # node returned zero features for every configuration tried and took the
+      # firmware down with it. Luxonis have since identified the cause of the
+      # empty output, and the two parameters below are the fix. Check it with:
+      #
+      #     python3 tools/probe_feature_tracker.py --device <ip> --luxonis-config
+      #
+      # If that reports corners, turn this on and compare closed-loop drift at
+      # 640x400 before raising the resolution -- one change at a time.
+      i_use_hw_tracker: false
+
+      # Harris threshold for the hardware detector.
+      #
+      # This scale is NOT normalised. 20000 is the value Luxonis gave; an
+      # earlier probe here passed 0.01, assuming a 0-1 scale, and recorded the
+      # resulting zero features as evidence that explicit thresholds did not
+      # help. Six orders of magnitude out, and the wrong conclusion drawn.
+      i_hw_tracker_threshold: 20000.0
+
+      # Applied to BOTH numMaxFeatures and numTargetFeatures.
+      #
+      # numMaxFeatures defaults to ZERO in the bindings, so a corner detector
+      # with only numTargetFeatures set is capped at no features at all --
+      # silently, and regardless of the threshold. That is the other half of why
+      # the earlier explicit-threshold test came back empty.
+      i_hw_tracker_max_features: 256
+
+      # setHardwareResources(n, n); negative leaves the node's own default.
+      i_hw_tracker_hardware_resources: -1
+      # The block's own optical-flow motion estimator.
+      i_hw_motion_estimator: true
+
       # ---- CPU feature detection and tracking ----------------------------
+      # Used when i_use_hw_tracker is false.
       # OpenCV goodFeaturesToTrack + calcOpticalFlowPyrLK, replacing the broken
       # hardware block. These are the knobs that trade accuracy against the
       # per-frame CPU cost.
@@ -222,3 +264,108 @@
 
       i_use_constant_velocity_seed: true
       i_publish_debug_features: false
+
+      # ---- IMU aid: the gyro rotation prior (Phase 4, steps 1-3) ---------
+      # Integrates the gyro between frame timestamps and uses the result as the
+      # rotation part of the RANSAC seed. Translation still comes from constant
+      # velocity.
+      #
+      # Cheap and low-risk: the seed is evaluated as one RANSAC hypothesis among
+      # many, so a good prior helps and a bad one is outvoted. It earns its keep
+      # under fast rotation, which is exactly when the constant-velocity model is
+      # worst AND motion blur has thinned the corners -- the seed matters most
+      # when the vision is weakest. At the 10 Hz this rig is FSYNC-limited to,
+      # 2 rad/s is 0.2 rad between frames, well past what extrapolating the last
+      # frame can predict.
+      #
+      # Needs an IMU-to-camera extrinsic in the device calibration. If there
+      # isn't one, startup says so and the VO runs on vision alone.
+      i_imu_enabled: true
+      i_imu_report_rate_hz: 200.0
+      # Low threshold keeps latency down: the prior is only useful if this
+      # frame's samples have arrived by the time the frame callback runs.
+      i_imu_batch_report_threshold: 1
+      i_imu_max_batch_reports: 10
+      # RAW rather than CALIBRATED, so the firmware's bias correction and the
+      # one below are not both correcting the same thing.
+      i_imu_use_raw_sensors: true
+
+      # Reject the prior when less than this fraction of the frame interval is
+      # covered by closely-spaced samples (see i_imu_max_sample_gap_factor). A
+      # window that has lost a burst attributes zero rotation to the gap, and a
+      # confidently-too-small prior is worse than none.
+      i_imu_min_sample_coverage: 0.6
+      # Longest sample spacing still counted as covered, in multiples of
+      # 1/report_rate. Raise if the IMU stream is bursty and good priors are
+      # being rejected; the health line reports the rejection reason.
+      i_imu_max_sample_gap_factor: 3.0
+
+      # How much of the gyro rotation to put in the seed: 1.0 gyro only, 0.0
+      # ignore it, in between a geodesic blend with the constant-velocity
+      # prediction. Lower it only if the extrinsic is suspect -- a wrong
+      # extrinsic makes the prior confidently wrong in a fixed direction.
+      i_imu_rotation_prior_weight: 1.0
+
+      # Gyro bias, estimated from intervals where the platform is judged still.
+      # Both tests must pass: a smooth constant-rate turn holds |a| at gravity
+      # while plainly rotating, and would otherwise teach the filter to subtract
+      # the turn rate from every frame.
+      i_imu_estimate_gyro_bias: true
+      i_imu_static_gyro_threshold: 0.02     # rad/s
+      i_imu_static_accel_tolerance: 0.35    # m/s^2 around 9.81
+      i_imu_bias_min_samples: 200           # one second at 200 Hz
+      # 1.5 rad between frames is 86 deg. Seeing it means the timestamps or the
+      # samples are wrong, not that the camera moved.
+      i_imu_max_rotation_per_interval_rad: 1.5
+
+      # ---- IMU aid: the error-state filter (Phase 4, steps 4-5) ----------
+      # SCAFFOLD. Off, and it should stay off until there are loop-drift numbers
+      # to compare. Propagation and the gravity update are unit tested; the
+      # filter as a whole has never run on hardware, and its VO update treats
+      # correlated absolute poses as independent fixes, which makes it
+      # over-confident -- the dangerous direction for anything downstream.
+      #
+      # What it would buy, honestly: bounded roll and pitch (gravity is an
+      # absolute direction, so those two axes are observable and correctable),
+      # smoother output between frames, and odometry at IMU rate. NOT bounded
+      # yaw or position -- nothing here can fix those without an external
+      # reference.
+      i_imu_filter_enabled: false
+      i_imu_filter_use_gravity: true
+      # Much larger than the sensor's own noise on purpose: the measurement
+      # model assumes no linear acceleration, and on a walking robot that is
+      # usually false, so the residual is dominated by unmodelled motion rather
+      # than by sensor noise.
+      i_imu_filter_gravity_sigma: 1.5
+      i_imu_filter_gravity_gate: 1.0
+      i_imu_filter_vo_covariance_scale: 1.0
+      # Republish odometry at IMU rate from the filter instead of at frame rate
+      # from the VO. Needs i_imu_filter_enabled. The frame-rate publish stands
+      # down when this is on, so the topic carries one pose per instant.
+      i_publish_at_imu_rate: false
+
+      # ---- LENS neural depth (Phase 5) -----------------------------------
+      # Co-run NeuralDepth on the DSP alongside the VO. The engines are separate
+      # -- VO uses the stereo block and (optionally) the feature-tracker block --
+      # so they should coexist. "Should" is why there is a measurement:
+      #
+      #     python3 tools/phase5_resource_check.py --device <ip>
+      #
+      # Fed the already-rectified pair with its own rectification disabled, so
+      # it does not redo StereoDepth's work and its depth lands in the frame the
+      # estimator already uses.
+      i_enable_neural_depth: false
+      # NEURAL_DEPTH_NANO / SMALL / MEDIUM / LARGE / EXTRA_LARGE. SMALL is the
+      # sensible starting point on a device also running VO: the larger models
+      # buy resolution the VO cannot use at a DSP cost that is the whole thing
+      # being measured.
+      i_neural_depth_model: NEURAL_DEPTH_SMALL
+
+      # Where the VO gets feature depth: "block_matcher" or "neural".
+      #
+      # A separate question from the co-run above, and it has a different
+      # answer. Neural depth is smoothed and, on low texture, partly inferred --
+      # good for dense perception, and a locally biased depth at a feature is a
+      # biased pose. Prefer the block matcher for VO when both are running; use
+      # "neural" if the DSP path is the only one available, or to A/B it.
+      i_depth_source: block_matcher
