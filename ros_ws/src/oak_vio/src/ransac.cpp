@@ -62,18 +62,36 @@ RansacResult RansacMotionSolver::solve(const std::vector<Correspondence>& corres
     Pose bestPose = seed;
     std::vector<int> bestInliers;
 
-    // Evaluate the prior first. When the platform moves smoothly this is
-    // usually already the best hypothesis, and starting from a strong inlier
-    // ratio collapses the adaptive iteration count to the minimum.
-    if(motionIsPlausible(seed)) {
-        bestInliers = scoreHypothesis(correspondences, seed);
-    }
-
     std::uniform_int_distribution<std::size_t> pick(0, correspondences.size() - 1);
     const auto total = static_cast<double>(correspondences.size());
 
     int iterations = 0;
     int budget = params_.ransacMaxIterations;
+
+    // Evaluate the prior first. When the platform moves smoothly this is
+    // usually already the best hypothesis, and starting from a strong inlier
+    // ratio collapses the adaptive iteration count to the minimum.
+    //
+    // The budget update below is the part that makes that true, and it used to
+    // be missing. The budget was only ever lowered inside the loop, when a
+    // RANDOM hypothesis beat the current best -- so in precisely the case this
+    // is for, where the seed is already the best hypothesis and nothing beats
+    // it, the budget stayed at ransacMaxIterations and the solve ran the full
+    // 200 iterations. A good seed produced the WORST cost, exactly inverting
+    // the intent, and it went unnoticed because the test that catches it
+    // (Ransac.GoodSeedReducesIterations) had never been run: the machine this
+    // was written on had no C++ toolchain.
+    //
+    // It matters twice over. The estimator is the only part of this pipeline
+    // that costs real ARM cycles, so this was a ~10x overspend on every frame
+    // that tracked smoothly; and the Phase 4 gyro prior's entire rationale is
+    // that a better seed is cheap because RANSAC exploits it. It could not.
+    if(motionIsPlausible(seed)) {
+        bestInliers = scoreHypothesis(correspondences, seed);
+        if(bestInliers.size() >= 3) {
+            budget = requiredIterations(static_cast<double>(bestInliers.size()) / total);
+        }
+    }
     while(iterations < budget) {
         ++iterations;
 
