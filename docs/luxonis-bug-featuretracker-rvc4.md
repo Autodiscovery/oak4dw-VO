@@ -1,5 +1,55 @@
 # Bug report: FeatureTracker crashes RVC4 firmware within ~2 seconds
 
+> ## READ THIS FIRST — the zero-features part of this report is withdrawn
+> **Updated after Luxonis's reply and after auditing our own probe.**
+>
+> The zero-feature result has two causes, and **one of them was ours**:
+>
+> 1. **Luxonis's finding.** The automatic corner-detector threshold
+>    (`thresholds.initialValue == 0`) returns empty feature messages on RVC4.
+>    The detector must be configured explicitly, with a working
+>    `initialValue` of about `20000`.
+> 2. **Ours.** `corner.numMaxFeatures` **defaults to 0** in the bindings, and
+>    our probe never set it — only `numTargetFeatures`. That caps the detector
+>    at zero features on its own, regardless of the threshold.
+> 3. **Ours.** The single variant labelled "explicit Harris threshold" passed
+>    `0.01`, on the unchecked assumption that the field was normalised 0–1. The
+>    working value is `20000`. Six orders of magnitude out — and its failure was
+>    then recorded as evidence that explicit thresholds did not help.
+>
+> All three produce an identical symptom: the node runs, emits empty messages,
+> and explains nothing. So **the "zero features for every configuration tried"
+> claim below should not be relied on**: at least one of the three applied to
+> every configuration listed. Re-test with
+> `tools/probe_feature_tracker.py --luxonis-config` before quoting any of it.
+>
+> **What is still unexplained and still worth reporting:**
+>
+> - **The firmware crash.** A misconfigured corner detector should find nothing,
+>   not take the device down. The control comparison below (identical pipeline,
+>   tracker removed, device stable) is unaffected by the configuration error and
+>   still stands.
+> - **Issue 2: `requestOutput` silently substituting NV12 for a requested
+>   GRAY8**, and NV12 then crashing the firmware rather than raising a node
+>   error.
+> - **Issue 3: the documented example calls `setWaitForConfigInput`**, which is
+>   absent from the installed bindings, so the official example cannot run as
+>   written — which also means the docs cannot be used to check whether a caller
+>   is initialising the node correctly. Given that a misconfigured detector fails
+>   *silently*, that is more consequential than it first looks: the docs are the
+>   only place the `numMaxFeatures` default would have been caught.
+> - **A suggestion worth making regardless of all the above:** a corner detector
+>   configured with `numMaxFeatures == 0` cannot ever produce a feature. That is
+>   a validation error, not a runtime state, and reporting it at configuration
+>   time would have saved every hour spent here.
+>
+> One more caveat on the data below, disclosed for completeness: roughly twenty
+> firmware crashes accumulated over one session, after which the device began
+> failing configurations that had demonstrably worked earlier the same day. Rows
+> gathered after the first crash of a session should be treated as device state
+> rather than as evidence.
+
+
 **Headline, with a control:** on an otherwise byte-for-byte identical pipeline,
 removing the `FeatureTracker` node makes the device stable. Adding it back crashes
 the firmware after a single frame. Reproducible on both mono sockets.

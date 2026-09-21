@@ -4,7 +4,27 @@
 Runs from the HOST against the live device, so each variant takes seconds rather
 than a container rebuild.
 
-Two things learned the hard way, both encoded here:
+START HERE:
+    python3 tools/probe_feature_tracker.py --device <ip> --luxonis-config
+
+That runs the configuration Luxonis identified as working and sweeps the Harris
+threshold. Two things are needed together, and either one missing produces
+exactly the same symptom -- a node that runs, emits empty feature messages, and
+explains nothing:
+
+  * corner.numMaxFeatures defaults to ZERO in the bindings. Setting only
+    numTargetFeatures caps the detector at no features regardless of anything
+    else. This probe originally did exactly that.
+
+  * The AUTOMATIC corner threshold returns empty feature messages on RVC4. The
+    threshold has to be set explicitly, and the scale is not normalised: a
+    working value is 20000. This probe originally passed 0.01, on the assumption
+    that it was normalised, and its failure was recorded as evidence that
+    explicit thresholds did not help. Six orders of magnitude out, and the wrong
+    conclusion drawn from it -- which is why the 0.01 row is still below, now
+    labelled as the negative control it always was.
+
+Two further things learned the hard way, both encoded here:
 
   * Camera.requestOutput(..., GRAY8, ...) is NOT honoured on this device -- it
     returns NV12, and the FeatureTracker rejects NV12 outright with
@@ -24,6 +44,7 @@ Two things learned the hard way, both encoded here:
     mean/std plausible  -> the image has content and the tracker is at fault
 
 Usage:
+    python3 tools/probe_feature_tracker.py --device <ip> --luxonis-config
     python3 tools/probe_feature_tracker.py --device <ip> --sweep
 """
 
@@ -107,21 +128,34 @@ def run_variant(ip, *, source, width, height, fps, hw_resources, threshold,
             tracker = pipeline.create(dai.node.FeatureTracker)
             if threshold is not None:
                 corner = dai.FeatureTrackerConfig.CornerDetector()
+                corner.type = dai.FeatureTrackerConfig.CornerDetector.Type.HARRIS
+                # BOTH counts. numMaxFeatures defaults to ZERO, so setting only
+                # numTargetFeatures caps the detector at no features at all --
+                # silently, and independently of the threshold. This line is
+                # half the reason the original "explicit threshold" variant came
+                # back empty; the other half was passing 0.01 on a scale where
+                # the working value is 20000.
+                corner.numMaxFeatures = num_target
                 corner.numTargetFeatures = num_target
-                corner.thresholds.initialValue = threshold
+                thresholds = dai.FeatureTrackerConfig.CornerDetector.Thresholds()
+                thresholds.initialValue = threshold
+                corner.thresholds = thresholds
                 tracker.initialConfig.setCornerDetector(corner)
             else:
+                # The automatic threshold. Kept as a variant precisely because
+                # it is the failing case Luxonis identified: the node runs,
+                # returns empty feature messages, and says nothing about why.
                 tracker.initialConfig.setNumTargetFeatures(num_target)
             if hw_resources is not None:
                 tracker.setHardwareResources(hw_resources, hw_resources)
 
-            # The documented example calls setWaitForConfigInput(true) and feeds
-            # inputConfig, rather than relying on initialConfig being applied at
-            # start. We never did either. Unlikely to be the fault -- a node
-            # waiting on config would emit nothing rather than empty messages,
-            # and it would not assert on its hardware session -- but it is in the
-            # official example and cheap to rule out.
+            # setWaitForConfigInput appears in the official docs example but is
+            # not present in the installed bindings, so the documented example
+            # cannot run as written. Guarded rather than removed, so the variant
+            # reports "not available" instead of crashing the sweep.
             if wait_for_config:
+                if not hasattr(tracker, "setWaitForConfigInput"):
+                    raise RuntimeError("setWaitForConfigInput absent from these bindings (docs example cannot run)")
                 tracker.setWaitForConfigInput(True)
             config_queue = tracker.inputConfig.createInputQueue() if (send_config or wait_for_config) else None
 
@@ -177,6 +211,89 @@ def run_variant(ip, *, source, width, height, fps, hw_resources, threshold,
     return best > 0, (frame_stats[0][1] if frame_stats else 0.0)
 
 
+def run_luxonis_config(args) -> int:
+    """Run the configuration Luxonis identified as working, sweeping the threshold.
+
+    This is the narrow question -- "does the hardware tracker produce corners on
+    THIS device, now?" -- separated from the wide sweep, because the answer
+    gates a design decision: with it, the front-end costs ~0 CPU and tracking
+    can run at 1280x800; without it, the CPU tracker stays and resolution is
+    bounded by ARM cycles.
+
+    Two things are being applied together, and either one alone reproduces the
+    original zero-feature symptom:
+
+        corner.numMaxFeatures    -- defaults to 0, which caps the detector at
+                                    nothing regardless of the threshold
+        thresholds.initialValue  -- the AUTOMATIC threshold returns empty
+                                    feature messages on RVC4
+
+    The threshold is swept rather than fixed at the 20000 Luxonis gave, because
+    a Harris threshold is scene-dependent: too high on a low-contrast wall finds
+    nothing, too low finds noise. The useful output is the shape of the sweep,
+    not one number.
+    """
+    print("Checking the hardware FeatureTracker with the configuration Luxonis identified.")
+    print("Both pieces matter: numMaxFeatures (defaults to 0) and an explicit threshold")
+    print("(the automatic one returns empty messages on RVC4).\n")
+
+    # Health first. Roughly twenty firmware crashes in one session taught this
+    # the hard way: every result gathered after the first crash of a session is
+    # suspect, and testing on a sick device generates noise that looks like data.
+    print(f"  {'threshold':<12} {'source':<12} {'resolution':<12} features")
+    print("  " + "-" * 60)
+
+    results = []
+    for threshold in args.thresholds:
+        for source in ("rectified", "camera"):
+            label = f"{threshold:<12.0f} {source:<12} {args.width}x{args.height}"
+            ok, _ = run_variant(args.device, source=source, width=args.width, height=args.height,
+                                fps=args.fps, hw_resources=args.hw_resources, threshold=threshold,
+                                num_target=args.num_target, seconds=args.seconds, label=label)
+            results.append((threshold, source, ok))
+
+    working = [(t, s) for t, s, ok in results if ok]
+    print()
+    if working:
+        best = sorted({t for t, _ in working})
+        print("The hardware feature tracker WORKS on this device.")
+        print(f"  Thresholds that produced corners: {', '.join(f'{t:.0f}' for t in best)}")
+        print(f"  Sources that produced corners:    {', '.join(sorted({s for _, s in working}))}")
+        print()
+        print("To use it, in params/vio.yaml:")
+        print("    vio.i_use_hw_tracker: true")
+        print(f"    vio.i_hw_tracker_threshold: {best[len(best) // 2]:.0f}   # middle of the working range")
+        print()
+        print("Then change ONE thing at a time. Measure closed-loop drift at 640x400 first,")
+        print("so the front-end swap is isolated; only then raise i_width/i_height to 1280x800")
+        print("to buy back the focal length (depth sigma at 5 m roughly halves, ~59 cm -> ~29 cm).")
+        print()
+        print("Also worth re-running the stationary test: the hardware block has no")
+        print("forward-backward consistency check and no subpixel refinement, both of which")
+        print("the CPU tracker does and both of which feed straight into pose error. A worse")
+        print("stationary drift number with a cheaper front-end is a real trade, not a bug.")
+        return 0
+
+    print("No threshold produced a single corner.")
+    print()
+    print("Before concluding the node is still broken, rule out the two things that")
+    print("produced false negatives here before:")
+    print("  1. Device health. If the firmware has crashed at all this session, power-cycle")
+    print("     and start again -- 'repro_feature_tracker_minimal.py --health' is the check.")
+    print("     Results after the first crash of a session are not evidence.")
+    print("  2. Versions. These results were taken on depthai 3.8.0 / Luxonis OS 1.37.0.")
+    print("     Luxonis asked for both to be updated; if they have not been, do that first.")
+    print()
+    print("If it still finds nothing on a healthy, updated device, the report in")
+    print("docs/luxonis-bug-featuretracker-rvc4.md stands and should be updated with this")
+    print("sweep attached -- an explicit-threshold sweep with numMaxFeatures set is a")
+    print("stronger result than anything filed so far.")
+    print()
+    print("Either way the VO is unaffected: leave vio.i_use_hw_tracker false and the CPU")
+    print("front-end carries on as it has been.")
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -194,9 +311,20 @@ def main() -> int:
     parser.add_argument("--wait-for-config", action="store_true",
                         help="setWaitForConfigInput(true) and send a config, as the docs example does.")
     parser.add_argument("--sweep", action="store_true")
+    parser.add_argument("--luxonis-config", action="store_true",
+                        help="Run the configuration Luxonis identified as working, sweeping the "
+                             "Harris threshold. This is the check to run before enabling "
+                             "vio.i_use_hw_tracker.")
+    parser.add_argument("--thresholds", type=float, nargs="+",
+                        default=[1000.0, 5000.0, 20000.0, 50000.0, 200000.0],
+                        help="Thresholds to sweep with --luxonis-config (default brackets the "
+                             "20000 Luxonis gave, since the right value depends on the scene).")
     args = parser.parse_args()
 
     print("Point the camera at something textured and well lit.\n")
+
+    if args.luxonis_config:
+        return run_luxonis_config(args)
 
     if not args.sweep:
         ok, _ = run_variant(args.device, source=args.source, width=args.width, height=args.height,
@@ -207,9 +335,16 @@ def main() -> int:
         return 0 if ok else 1
 
     variants = [
-        # The two documented-example variants first: setWaitForConfigInput plus an
-        # explicit inputConfig send is the one API path never tried, and it is
-        # what the official docs example actually does.
+        # The Luxonis-identified configuration first, since it is the one with a
+        # reason to work. Everything below it is the historical sweep, retained
+        # so a regression is distinguishable from a fresh fault.
+        ("LUXONIS CONFIG: explicit threshold 20000 + numMaxFeatures",
+         dict(source="rectified", width=640, height=400, hw_resources=None, threshold=20000.0)),
+        ("LUXONIS CONFIG from camera, not rectified",
+         dict(source="camera", width=640, height=400, hw_resources=None, threshold=20000.0)),
+        # The two documented-example variants: setWaitForConfigInput plus an
+        # explicit inputConfig send is what the official docs example does,
+        # though the method is absent from the installed bindings.
         ("docs example: setWaitForConfigInput + config send",
          dict(source="camera", width=640, height=400, hw_resources=2, threshold=None,
               send_config=True, wait_for_config=True)),
@@ -220,7 +355,12 @@ def main() -> int:
          dict(source="camera", width=640, height=400, hw_resources=None, threshold=None)),
         ("camera 640x400 + hwResources(2,2)",
          dict(source="camera", width=640, height=400, hw_resources=2, threshold=None)),
-        ("camera 640x400 + explicit threshold 0.01",
+        # Retained as a NEGATIVE control, not as a test of explicit thresholds.
+        # 0.01 was chosen on the assumption that the field was normalised 0-1;
+        # the working value is 20000. This row is what a threshold six orders of
+        # magnitude too low looks like, which is the same as no corners at all --
+        # and that indistinguishability is why the original conclusion was wrong.
+        ("negative control: threshold 0.01 (wrong by 10^6)",
          dict(source="camera", width=640, height=400, hw_resources=None, threshold=0.01)),
         ("camera 1280x720",
          dict(source="camera", width=1280, height=720, hw_resources=None, threshold=None)),
