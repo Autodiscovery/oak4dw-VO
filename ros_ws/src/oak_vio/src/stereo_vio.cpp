@@ -33,6 +33,7 @@ void StereoVio::reset(const Pose& worldFromCamera) {
     lastTimestamp_ = 0.0;
     haveLastTimestamp_ = false;
     consecutiveFailures_ = 0;
+    everTracked_ = false;
     lastSelected_.clear();
     lastInlierIndices_.clear();
 }
@@ -67,12 +68,32 @@ VioFrameResult StereoVio::processFrame(const std::vector<Observation>& observati
         return r;
     };
 
-    // ---- Bootstrap -------------------------------------------------------
+    // ---- Bootstrap, or a frame with nothing in it ------------------------
     if(!keyframes_.hasKeyframe()) {
         promoteKeyframe(observations, false);
-        result.state = TrackingState::Initialising;
-        result.keyframePromoted = true;
-        result.note = "keyframe initialised";
+        // Only actually promoted if the frame had observations to promote --
+        // KeyframeManager treats an empty keyframe as no keyframe.
+        result.keyframePromoted = keyframes_.hasKeyframe();
+
+        if(everTracked_) {
+            // This branch is reached two ways, and reporting them the same is a
+            // defect in the one signal consumers are told to trust. Before
+            // anything has ever tracked, no keyframe means starting up. AFTER
+            // tracking has worked, no keyframe means the frames arriving carry
+            // nothing usable -- a covered lens, a blackout, severe blur -- which
+            // is LOST, not initialising. A downstream filter reading
+            // Initialising concludes "no pose yet, wait"; reading Lost it
+            // concludes "hold the last pose and inflate", which is the correct
+            // response and the opposite behaviour.
+            result.state = TrackingState::Lost;
+            result.note = "no usable observations, so no keyframe could be anchored";
+            ++consecutiveFailures_;
+            motionModel_.reset();
+        } else {
+            result.state = TrackingState::Initialising;
+            result.note = "keyframe initialised";
+        }
+        result.poseCovariance = integrator_.covariance();
         return finish(result);
     }
 
@@ -160,6 +181,7 @@ VioFrameResult StereoVio::processFrame(const std::vector<Observation>& observati
     haveKeyframeFromPrevious_ = true;
 
     result.valid = true;
+    everTracked_ = true;
     result.keyframeFromCurrent = solved.pose;
     result.worldFromCamera = integrator_.worldFromCamera();
     result.poseCovariance = integrator_.covariance();

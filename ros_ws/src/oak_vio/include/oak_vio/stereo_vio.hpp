@@ -95,6 +95,14 @@ class StereoVio {
     Pose keyframeFromPrevious_;
     bool haveKeyframeFromPrevious_{false};
 
+    /// Has any frame ever produced a usable estimate?
+    ///
+    /// Distinguishes "starting up" from "lost": without it, a frame carrying no
+    /// observations after minutes of good tracking reports Initialising, which
+    /// tells a downstream filter to wait for a first pose rather than to hold
+    /// the last one.
+    bool everTracked_{false};
+
     std::int64_t frameIndex_{-1};
     double lastTimestamp_{0.0};
     bool haveLastTimestamp_{false};
