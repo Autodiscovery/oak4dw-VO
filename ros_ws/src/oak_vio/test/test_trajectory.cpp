@@ -21,11 +21,22 @@ constexpr double kFrameDt = 1.0 / 30.0;
 /// A closed loop: the camera traces a small circle in the x-z plane, yawing
 /// gently, and returns exactly to its start. Closing the loop is what makes
 /// drift measurable without needing an external reference.
+/// A closed loop: the LAST pose equals the first, exactly.
+///
+/// The divisor is (frames - 1), not frames. With `frames` the trajectory stops
+/// one step short of closing, so the final pose sits a step's length away from
+/// the start — and every test here measures "drift" as the distance from the
+/// final estimate to trajectory.front(). That made the headline metric of this
+/// whole project report a fixed offset as drift: for the 120-frame, 0.5 m loop
+/// it was 26 mm of pure geometry, against a 1 mm tolerance, with the estimator
+/// itself accurate to well under 1 mm. A closed-loop drift figure is only
+/// meaningful if the loop closes.
 std::vector<Pose> makeLoopTrajectory(int frames, double radius, double yawAmplitude) {
     std::vector<Pose> poses;
     poses.reserve(static_cast<std::size_t>(frames));
+    const double divisor = static_cast<double>(std::max(frames - 1, 1));
     for(int i = 0; i < frames; ++i) {
-        const double phase = 2.0 * M_PI * static_cast<double>(i) / static_cast<double>(frames);
+        const double phase = 2.0 * M_PI * static_cast<double>(i) / divisor;
         Pose pose;
         pose.R = expSO3(Vec3(0.0, yawAmplitude * std::sin(phase), 0.0));
         pose.t = Vec3(radius * std::sin(phase), 0.0, radius * (1.0 - std::cos(phase)));

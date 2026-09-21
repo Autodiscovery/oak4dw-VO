@@ -153,6 +153,7 @@ class SyntheticScene {
 };
 
 /// Pose from an axis-angle rotation and a translation, for readable tests.
+/// (makeLoopTrajectory lives in test_trajectory.cpp, next to its users.)
 inline Pose makePose(const Vec3& rotationVector, const Vec3& translation) {
     Pose pose;
     pose.R = expSO3(rotationVector);

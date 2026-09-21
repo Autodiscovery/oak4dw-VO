@@ -79,6 +79,33 @@ TEST(MotionEstimator, AnalyticJacobianMatchesNumericalDerivative) {
     EXPECT_LT(worstRelativeError, 1e-6) << "worst relative error " << worstRelativeError;
 }
 
+// What "exact" can mean here, and why it is not 1e-8.
+//
+// Observation stores u, v and disparity as FLOAT. A pixel coordinate near 1000
+// therefore carries a quantisation step of about 1.2e-4 px before the estimator
+// sees it, whatever the estimator then does in double precision. Propagated
+// through triangulation that is roughly (du / fx) * Z of position error -- about
+// 4e-6 m for a 20 m point at fx = 537 px -- so a noise-free solve cannot beat a
+// few times 1e-7 no matter how good the algorithm is.
+//
+// These tolerances are therefore set from the MEASUREMENT's precision, not from
+// double precision, with about 10x headroom over what is observed. Tightening
+// them further does not test the estimator; it tests the width of a float. The
+// original 1e-8 could never pass, and never had a chance to be noticed: the
+// machine this suite was written on had no C++ toolchain, so it had never run.
+constexpr double kExactRotationTolerance = 1e-6;     // rad
+constexpr double kExactTranslationTolerance = 1e-5;  // m
+
+// The three-point minimal solve gets its own, looser pair. It has no averaging
+// to hide behind: each point's float quantisation contributes about
+// du / fx = 2.2e-7 rad directly, and an unlucky near-degenerate triple
+// amplifies that. Observed worst case over 50 random triples is 1.0e-6 rad and
+// 4.3e-7 m, so these keep roughly 10x headroom. Holding the minimal solve to
+// the same bar as a 200-point refinement is asking three points to do the work
+// of two hundred.
+constexpr double kMinimalRotationTolerance = 1e-5;     // rad
+constexpr double kMinimalTranslationTolerance = 1e-5;  // m
+
 TEST(MotionEstimator, RecoversPoseExactlyWithoutNoise) {
     const MotionEstimator estimator = makeEstimator();
     SyntheticScene scene(makeTestCamera(), 1280, 800, 7);
@@ -101,8 +128,8 @@ TEST(MotionEstimator, RecoversPoseExactlyWithoutNoise) {
         const RefinementResult refined = estimator.refine(correspondences, allIndices(correspondences.size()), seed);
 
         ASSERT_FALSE(refined.degenerate);
-        EXPECT_LT(rotationError(expected, refined.pose), 1e-8);
-        EXPECT_LT((expected.t - refined.pose.t).norm(), 1e-8);
+        EXPECT_LT(rotationError(expected, refined.pose), kExactRotationTolerance);
+        EXPECT_LT((expected.t - refined.pose.t).norm(), kExactTranslationTolerance);
     }
 }
 
@@ -130,8 +157,8 @@ TEST(MotionEstimator, ClosedFormIsExactFromThreePoints) {
 
         Pose solved;
         ASSERT_TRUE(estimator.solveMinimal(correspondences, sample, solved));
-        EXPECT_LT(rotationError(expected, solved), 1e-8);
-        EXPECT_LT((expected.t - solved.t).norm(), 1e-8);
+        EXPECT_LT(rotationError(expected, solved), kMinimalRotationTolerance);
+        EXPECT_LT((expected.t - solved.t).norm(), kMinimalTranslationTolerance);
     }
 }
 
