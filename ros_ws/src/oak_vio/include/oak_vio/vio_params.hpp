@@ -116,6 +116,20 @@ struct VioParams {
     /// Discard the velocity seed if the last estimate is older than this many
     /// frames — a stale prediction is worse than identity.
     int maxSeedAgeFrames{3};
+
+    /// How much of the gyro-integrated rotation to put into the seed, against
+    /// the constant-velocity prediction: 1.0 is gyro only, 0.0 ignores it,
+    /// in between is a geodesic blend on SO(3).
+    ///
+    /// Default 1.0. A MEMS gyro integrated over one frame interval is far more
+    /// accurate about rotation than extrapolating the last frame's motion, and
+    /// this only sets a seed — RANSAC still has to prefer the hypothesis. Lower
+    /// it only if the extrinsic rotation is suspect, since a wrong extrinsic
+    /// makes the prior confidently wrong in a fixed direction.
+    ///
+    /// Mirrors ImuParams::rotationPriorWeight; the node sets both from
+    /// vio.i_imu_rotation_prior_weight so they cannot disagree.
+    double gyroPriorWeight{1.0};
 };
 
 }  // namespace oak_vio

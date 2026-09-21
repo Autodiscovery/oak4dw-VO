@@ -48,6 +48,10 @@ void StereoVio::promoteKeyframe(const std::vector<Observation>& observations, bo
 }
 
 VioFrameResult StereoVio::processFrame(const std::vector<Observation>& observations, double timestampSeconds) {
+    return processFrame(observations, timestampSeconds, RotationPrior{});
+}
+
+VioFrameResult StereoVio::processFrame(const std::vector<Observation>& observations, double timestampSeconds, const RotationPrior& rotationPrior) {
     const auto wallStart = std::chrono::steady_clock::now();
 
     ++frameIndex_;
@@ -128,9 +132,37 @@ VioFrameResult StereoVio::processFrame(const std::vector<Observation>& observati
     // ---- Seed ------------------------------------------------------------
     // Constant velocity predicts the *inter-frame* motion; compose it onto the
     // last keyframe-relative estimate to get a keyframe-relative seed.
+    //
+    // The gyro prior, when present, overrides that prediction's ROTATION and
+    // leaves its translation alone. Two reasons it is worth the plumbing:
+    // rotation is the component the constant-velocity model predicts worst
+    // (angular rate changes far faster than linear velocity on a walking or
+    // legged platform), and fast rotation is simultaneously when motion blur
+    // thins the corners — so the seed matters most exactly when the vision is
+    // weakest. It also applies on frames where constant velocity has nothing to
+    // offer, which is the first frame of every keyframe span.
     Pose seed = keyframeFromPrevious_;
+    Pose predictedDelta;  // identity
+    bool havePrediction = false;
+
     if(params_.useConstantVelocitySeed && haveKeyframeFromPrevious_ && dt > 0.0) {
-        const Pose predictedDelta = motionModel_.predict(dt, frameIndex_, params_.maxSeedAgeFrames);
+        predictedDelta = motionModel_.predict(dt, frameIndex_, params_.maxSeedAgeFrames);
+        havePrediction = true;
+    }
+
+    if(rotationPrior.valid) {
+        predictedDelta.R = blendRotation(predictedDelta.R, rotationPrior.deltaRotation, params_.gyroPriorWeight);
+        havePrediction = true;
+        result.usedGyroPrior = true;
+        result.gyroPriorAngleRad = rotationPrior.angleRad;
+    } else {
+        result.gyroPriorRejection = rotationPrior.rejection;
+    }
+
+    if(havePrediction) {
+        // Composing onto keyframeFromPrevious_ is right in both cases: when the
+        // keyframe is the previous frame that member is identity, so this
+        // collapses to the inter-frame prediction itself.
         seed = predictedDelta * keyframeFromPrevious_;
     }
 

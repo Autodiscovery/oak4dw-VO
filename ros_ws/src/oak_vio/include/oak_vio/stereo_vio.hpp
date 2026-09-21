@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "oak_vio/imu_integrator.hpp"
 #include "oak_vio/keyframe_manager.hpp"
 #include "oak_vio/motion_model.hpp"
 #include "oak_vio/pose_integrator.hpp"
@@ -45,6 +46,15 @@ struct VioFrameResult {
     bool keyframePromoted{false};
     const char* note{""};
 
+    /// Phase 4: whether this frame's seed carried the gyro-integrated rotation,
+    /// and how much rotation that was. Reported so the IMU's contribution is
+    /// visible rather than assumed — a prior that is silently being rejected
+    /// every frame looks exactly like a prior that is not helping.
+    bool usedGyroPrior{false};
+    double gyroPriorAngleRad{0.0};
+    /// Why the prior was not used, when it was not. Empty when it was.
+    const char* gyroPriorRejection{""};
+
     double solveMilliseconds{0.0};
     std::int64_t frameIndex{-1};
     double timestampSeconds{0.0};
@@ -58,6 +68,17 @@ class StereoVio {
     /// rectified left image with disparity already sampled; see
     /// DepthSource for where that comes from.
     VioFrameResult processFrame(const std::vector<Observation>& observations, double timestampSeconds);
+
+    /// As above, with a gyro-integrated rotation prior for the seed.
+    ///
+    /// The prior replaces (or, at a weight below 1, blends with) the rotation
+    /// component of the constant-velocity prediction; translation still comes
+    /// from constant velocity, since an accelerometer cannot supply inter-frame
+    /// translation at this scale without a filter carrying velocity — which is
+    /// what ImuFilter is for. Nothing else in the estimator changes: the seed is
+    /// already evaluated as a RANSAC hypothesis in its own right, so a better
+    /// seed costs nothing and a bad one is simply outvoted.
+    VioFrameResult processFrame(const std::vector<Observation>& observations, double timestampSeconds, const RotationPrior& rotationPrior);
 
     /// Drop all state and restart from the given world pose.
     void reset(const Pose& worldFromCamera = Pose{});
