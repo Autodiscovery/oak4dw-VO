@@ -39,6 +39,11 @@ add_library(oak_vio_core SHARED
   src/motion_model.cpp
   src/pose_integrator.cpp
   src/stereo_vio.cpp
+  # Phase 4. Both are free of DepthAI: the node converts dai::IMUPacket into
+  # ImuSample at the boundary, which is what keeps the gyro integration and the
+  # filter testable against analytic trajectories on a workstation.
+  src/imu_integrator.cpp
+  src/imu_filter.cpp
 )
 target_include_directories(oak_vio_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -142,6 +147,8 @@ if(BUILD_TESTING)
     test/test_bucketing.cpp
     test/test_pose_integrator.cpp
     test/test_trajectory.cpp
+    test/test_imu_integrator.cpp
+    test/test_imu_filter.cpp
   )
   if(TARGET test_oak_vio)
     target_include_directories(test_oak_vio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test)
